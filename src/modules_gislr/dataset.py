@@ -6,7 +6,7 @@
 
 
 
-Copyright (c) 2024 N.Takayama @ TRaD <takayaman@uec.ac.jp>
+Copyright (c) 2024 N.Takayama @ TRaD <takayaman@takayama-rado.com>
 -------------------------------------------------------------------------------
 """
 

@@ -6,7 +6,7 @@
 
 
 
-Copyright (c) 2024 N.Takayama @ TRaD <takayaman@uec.ac.jp>
+Copyright (c) 2024 N.Takayama @ TRaD <takayaman@takayama-rado.com>
 -------------------------------------------------------------------------------
 """
 
@@ -92,12 +92,12 @@ class AlignAndNormalize():
     def __init__(self,
                  face_head=0,
                  face_num=76,
-                 face_origin=[7, 25],
+                 face_origin=[0, 2],
                  face_unit1=[7],
-                 face_unit2=[25],
+                 face_unit2=[42],
                  lhand_head=76,
                  lhand_num=21,
-                 lhand_origin=[0],
+                 lhand_origin=[0, 2, 5, 9, 13, 17],
                  lhand_unit1=[0],
                  lhand_unit2=[2, 5, 9, 13, 17],
                  pose_head=76+21,
@@ -107,7 +107,7 @@ class AlignAndNormalize():
                  pose_unit2=[1],
                  rhand_head=76+21+12,
                  rhand_num=21,
-                 rhand_origin=[0],
+                 rhand_origin=[0, 2, 3, 9, 13, 17],
                  rhand_unit1=[0],
                  rhand_unit2=[2, 5, 9, 13, 17],
                  wo_norm=False) -> None:
@@ -144,7 +144,7 @@ class AlignAndNormalize():
         unit1 = feature[:, :, unit_lm1].mean(axis=-1, keepdims=True)
         unit2 = feature[:, :, unit_lm2].mean(axis=-1, keepdims=True)
         unit = np.abs(unit1 - unit2).mean(axis=1, keepdims=True)
-        unit = np.clip(unit, a_min=1.0e-3, a_max=None)
+        unit = np.clip(unit, a_min=1.0, a_max=None)
 
         _feature = _feature - origin
         _feature = _feature / unit if self.wo_norm is False else _feature
