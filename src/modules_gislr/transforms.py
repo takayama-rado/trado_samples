@@ -137,14 +137,26 @@ class AlignAndNormalize():
 
         self.wo_norm = wo_norm
 
-    def _normalize(self, feature, tmask, origin_lm, unit_lm1, unit_lm2):
+    def _normalize(self, feature, tmask, origin_lm, unit_lm1, unit_lm2,
+                   unit_range=[1.0e-3, 5.0]):
         _feature = feature * tmask
         # `[C, T, J] -> [C, T, 1]`
         origin = feature[:, :, origin_lm].mean(axis=-1, keepdims=True)
-        unit1 = feature[:, :, unit_lm1].mean(axis=-1, keepdims=True)
-        unit2 = feature[:, :, unit_lm2].mean(axis=-1, keepdims=True)
-        unit = np.abs(unit1 - unit2).mean(axis=1, keepdims=True)
-        unit = np.clip(unit, a_min=1.0, a_max=None)
+        if self.wo_norm is False:
+            # The frame-wise unit lengths are unstable.
+            # So, we calculate average unit length.
+            # Extract.
+            unit1 = feature[:, :, unit_lm1].mean(axis=-1)
+            unit2 = feature[:, :, unit_lm2].mean(axis=-1)
+            # Mean square between target points.
+            unit = np.sqrt((unit1 - unit2) ** 2)
+            # Norm.
+            unit = np.linalg.norm(unit, axis=0)
+            # Calculate average removing undetected frame.
+            unit = unit[unit > 0].mean()
+            # Finally, clip extreme values.
+            unit = np.clip(unit, a_min=unit_range[0], a_max=unit_range[1])
+            unit = 1.0 if np.isnan(unit).any() else unit
 
         _feature = _feature - origin
         _feature = _feature / unit if self.wo_norm is False else _feature
