@@ -30,6 +30,58 @@ from torch.nn import functional as F
 VERSION = u"%(prog)s dev"
 
 
+class Zero(nn.Module):
+    """Place holder layer to return zero vector.
+    """
+    # This design is on purpose.
+    # pylint: disable=unused-argument
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+
+    def forward(self, feature, *args, **kwargs):
+        """Perform forward computation.
+        """
+        return 0
+
+
+class Identity(nn.Module):
+    """Place holder layer to return identity vector.
+    """
+    # This design is on purpose.
+    # pylint: disable=unused-argument
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+
+    def forward(self, feature, *args, **kwargs):
+        """Perform forward computation.
+        """
+        return feature
+
+
+class TemporalAttention(nn.Module):
+    def __init__(self,
+                 in_channels,
+                 attention_type):
+        super().__init__()
+        assert attention_type in ["sigmoid", "softmax", "sig_soft"]
+        self.linear = nn.Linear(in_channels, 1)
+        if attention_type == "sigmoid":
+            self.activation = nn.Sigmoid()
+        elif attention_type == "softmax":
+            self.activation = nn.Softmax(dim=1)
+        else:
+            self.activation = nn.Sequential(
+                nn.Sigmoid(),
+                nn.Softmax(dim=1))
+
+    def forward(self, feature):
+        # `[N, T, C]`
+        attw = self.linear(feature)
+        attw = self.activation(attw)
+        feature = attw * feature
+        return feature, attw
+
+
 class GPoolRecognitionHead(nn.Module):
     def __init__(self,
                  in_channels,
@@ -83,6 +135,163 @@ class SimpleISLR(nn.Module):
         # `[N, T, C'] -> [N, C', T]`
         feature = feature.permute(0, 2, 1)
         logit = self.head(feature)
+        return logit
+
+
+class RNNEncoder(nn.Module):
+    def __init__(self,
+                 in_channels,
+                 out_channels,
+                 rnn_type,
+                 num_layers,
+                 activation,
+                 bidir,
+                 dropout,
+                 apply_mask,
+                 proj_size=0):
+        super().__init__()
+        assert rnn_type in ["rnn", "lstm", "gru"]
+
+        if rnn_type == "rnn":
+            self.rnn = nn.RNN(input_size=in_channels,
+                              hidden_size=out_channels,
+                              num_layers=num_layers,
+                              nonlinearity=activation,
+                              batch_first=True,
+                              dropout=dropout,
+                              bidirectional=bidir)
+        elif rnn_type == "lstm":
+            self.rnn = nn.LSTM(input_size=in_channels,
+                               hidden_size=out_channels,
+                               num_layers=num_layers,
+                               batch_first=True,
+                               dropout=dropout,
+                               bidirectional=bidir,
+                               proj_size=proj_size)
+        elif rnn_type == "gru":
+            self.rnn = nn.GRU(input_size=in_channels,
+                              hidden_size=out_channels,
+                              num_layers=num_layers,
+                              batch_first=True,
+                              dropout=dropout,
+                              bidirectional=bidir)
+        self.num_layers = num_layers
+        self.apply_mask = apply_mask
+
+    def sep_state_layerwise(self, last_state):
+        # `[D * num_layers, N, C] -> [N, D * num_layers, C]`
+        last_state = last_state.permute(1, 0, 2)
+        # `[N, D * num_layers, C] -> (num_layers, [N, D, C]) -> [N, D, C]`
+        if self.num_layers > 1:
+            last_state = torch.split(last_state, self.num_layers, dim=1)
+        else:
+            last_state = (last_state,)
+        return last_state
+
+    def forward(self, feature, feature_pad_mask=None):
+        if feature_pad_mask is not None and self.apply_mask:
+            tlength = feature_pad_mask.sum(axis=-1).detach().cpu()
+            feature = nn.utils.rnn.pack_padded_sequence(
+                feature, tlength, batch_first=True, enforce_sorted=False)
+
+        if isinstance(self.rnn, nn.LSTM):
+            hidden_seqs, (last_hstate, last_cstate) = self.rnn(feature)
+        else:
+            hidden_seqs, last_hstate = self.rnn(feature)
+            last_cstate = None
+        # Unpack hidden sequence.
+        if isinstance(hidden_seqs, nn.utils.rnn.PackedSequence):
+            hidden_seqs = nn.utils.rnn.unpack_sequence(hidden_seqs)
+            # Back list to padded batch.
+            hidden_seqs = nn.utils.rnn.pad_sequence(
+                hidden_seqs, batch_first=True, padding_value=0.0)
+
+        return hidden_seqs, last_hstate, last_cstate
+
+
+class RNNISLR(nn.Module):
+    def __init__(self,
+                 in_channels,
+                 hidden_channels,
+                 out_channels,
+                 rnn_type="lstm",
+                 rnn_num_layers=1,
+                 rnn_activation="tanh",
+                 rnn_bidir=False,
+                 rnn_dropout=0.1,
+                 apply_mask=True,
+                 masking_type="both",
+                 attention_type="none",
+                 head_type="gpool"):
+        super().__init__()
+        assert rnn_type in ["rnn", "lstm", "gru"]
+        assert masking_type in ["none", "rnn", "head", "both"]
+        assert attention_type in ["none", "sigmoid", "softmax", "sig_soft"]
+        assert head_type in ["gpool", "last_state"]
+
+        self.linear = nn.Linear(in_channels, hidden_channels)
+        self.activation = nn.ReLU()
+
+        apply_mask = True if masking_type in ["rnn", "both"] else False
+        self.rnn = RNNEncoder(
+            in_channels=hidden_channels,
+            out_channels=hidden_channels,
+            rnn_type=rnn_type,
+            num_layers=rnn_num_layers,
+            activation=rnn_activation,
+            bidir=rnn_bidir,
+            dropout=rnn_dropout,
+            apply_mask=apply_mask)
+
+        if attention_type != "none":
+            if rnn_bidir:
+                self.att = TemporalAttention(hidden_channels * 2, attention_type)
+            else:
+                self.att = TemporalAttention(hidden_channels, attention_type)
+        else:
+            self.att = Identity()
+        self.attw = None
+
+        if rnn_bidir:
+            self.head = GPoolRecognitionHead(hidden_channels * 2, out_channels)
+        else:
+            self.head = GPoolRecognitionHead(hidden_channels, out_channels)
+
+        self.masking_type = masking_type
+        self.head_type = head_type
+
+    def forward(self, feature, feature_pad_mask=None):
+        # Feature extraction.
+        # `[N, C, T, J] -> [N, T, C, J] -> [N, T, C*J] -> [N, T, C']`
+        N, C, T, J = feature.shape
+        feature = feature.permute([0, 2, 1, 3])
+        feature = feature.reshape(N, T, -1)
+
+        feature = self.linear(feature)
+        feature = self.activation(feature)
+
+        hidden_seqs, last_hstate = self.rnn(feature, feature_pad_mask)[:2]
+
+        # Apply attention.
+        hidden_seqs = self.att(hidden_seqs)
+        if isinstance(hidden_seqs, (tuple, list)):
+            hidden_seqs, self.attw = hidden_seqs[0], hidden_seqs[1]
+
+        if self.head_type == "gpool":
+            # `[N, T, C'] -> [N, C', T]`
+            feature = hidden_seqs.permute(0, 2, 1)
+        else:  # "last_state"
+            last_hstate = self.rnn.sep_state_layerwise(last_hstate)
+            # `(num_layers, [N, D, C]) -> [N, D, C] -> [N, T(=1), D*C]`
+            last_hstate = last_hstate[-1]
+            feature = last_hstate.reshape([last_hstate.shape[0], 1, -1])
+            # `[N, T, D*C] -> [N, D*C, T]`
+            feature = feature.permute(0, 2, 1)
+
+        if feature_pad_mask is not None and self.masking_type in ["head", "both"]:
+            logit = self.head(feature, feature_pad_mask)
+        else:
+            logit = self.head(feature)
         return logit
 
 
