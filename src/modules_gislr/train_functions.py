@@ -34,12 +34,14 @@ DIR_INPUT = None
 DIR_OUTPUT = None
 
 
-def train_loop(dataloader, model, loss_fn, optimizer, device):
+def train_loop(dataloader, model, loss_fn, optimizer, device, use_mask=True):
+    num_batches = len(dataloader)
+    train_loss = 0
     size = len(dataloader.dataset)
 
     # Inspect model signature.
     sig = signature(model.forward)
-    use_mask = True if "feature_pad_mask" in sig.parameters else False
+    use_mask = True if "feature_pad_mask" in sig.parameters and use_mask is True else False
 
     # Switch to training mode.
     model.train()
@@ -67,21 +69,28 @@ def train_loop(dataloader, model, loss_fn, optimizer, device):
         loss.backward()
         optimizer.step()
 
+        train_loss += loss.item()
+
         # Print current loss per 100 steps.
         if batch_idx % 100 == 0:
             loss = loss.item()
             steps = batch_idx * len(feature)
             print(f"loss:{loss:>7f} [{steps:>5d}/{size:>5d}]")
     print(f"Done. Time:{time.perf_counter()-start}")
+    # Average loss.
+    train_loss /= num_batches
+    print("Training performance: \n",
+          f"Avg loss:{train_loss:>8f}\n")
+    return train_loss
 
 
-def val_loop(dataloader, model, loss_fn, device):
+def val_loop(dataloader, model, loss_fn, device, use_mask=True):
     num_batches = len(dataloader)
     val_loss = 0
 
     # Inspect model signature.
     sig = signature(model.forward)
-    use_mask = True if "feature_pad_mask" in sig.parameters else False
+    use_mask = True if "feature_pad_mask" in sig.parameters and use_mask is True else False
 
     # Switch to evaluation mode.
     model.eval()
@@ -112,13 +121,13 @@ def val_loop(dataloader, model, loss_fn, device):
     return val_loss
 
 
-def test_loop(dataloader, model, device):
+def test_loop(dataloader, model, device, use_mask=False):
     size = len(dataloader.dataset)
     correct = 0
 
     # Inspect model signature.
     sig = signature(model.forward)
-    use_mask = True if "feature_pad_mask" in sig.parameters else False
+    use_mask = True if "feature_pad_mask" in sig.parameters and use_mask is True else False
 
     # Switch to evaluation mode.
     model.eval()
