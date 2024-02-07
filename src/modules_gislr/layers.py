@@ -46,10 +46,15 @@ class GPoolRecognitionHead(nn.Module):
                         mean=0.,
                         std=math.sqrt(1. / self.out_channels))
 
-    def forward(self, feature):
+    def forward(self, feature, feature_pad_mask=None):
         # Averaging over temporal axis.
         # `[N, C, T] -> [N, C, 1] -> [N, C]`
-        feature = feature = F.avg_pool1d(feature, kernel_size=feature.shape[-1])
+        if feature_pad_mask is not None:
+            tlength = feature_pad_mask.sum(dim=-1)
+            feature = feature * feature_pad_mask.unsqueeze(1)
+            feature = feature.sum(dim=-1) / tlength.unsqueeze(-1)
+        else:
+            feature = F.avg_pool1d(feature, kernel_size=feature.shape[-1])
         feature = feature.reshape(feature.shape[0], -1)
 
         # Predict.
