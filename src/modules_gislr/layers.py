@@ -150,9 +150,9 @@ class RNNEncoder(nn.Module):
                  apply_mask,
                  proj_size=0):
         super().__init__()
-        assert rnn_type in ["rnn", "lstm", "gru"]
+        assert rnn_type in ["srnn", "lstm", "gru"]
 
-        if rnn_type == "rnn":
+        if rnn_type == "srnn":
             self.rnn = nn.RNN(input_size=in_channels,
                               hidden_size=out_channels,
                               num_layers=num_layers,
