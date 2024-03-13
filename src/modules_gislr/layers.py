@@ -245,11 +245,12 @@ class RNNISLR(nn.Module):
                  apply_mask=True,
                  masking_type="both",
                  attention_type="none",
+                 attention_post_scale=False,
                  head_type="gpool"):
         super().__init__()
-        assert rnn_type in ["rnn", "lstm", "gru"]
+        assert rnn_type in ["srnn", "lstm", "gru"]
         assert masking_type in ["none", "rnn", "head", "both"]
-        assert attention_type in ["none", "sigmoid", "softmax", "sig_soft"]
+        assert attention_type in ["none", "sigmoid", "softmax"]
         assert head_type in ["gpool", "last_state"]
 
         self.linear = nn.Linear(in_channels, hidden_channels)
@@ -268,9 +269,11 @@ class RNNISLR(nn.Module):
 
         if attention_type != "none":
             if rnn_bidir:
-                self.att = TemporalAttention(hidden_channels * 2, attention_type)
+                self.att = TemporalAttention(hidden_channels * 2, attention_type,
+                    post_scale=attention_post_scale)
             else:
-                self.att = TemporalAttention(hidden_channels, attention_type)
+                self.att = TemporalAttention(hidden_channels, attention_type,
+                    post_scale=attention_post_scale)
         else:
             self.att = Identity()
         self.attw = None
@@ -296,7 +299,7 @@ class RNNISLR(nn.Module):
         hidden_seqs, last_hstate = self.rnn(feature, feature_pad_mask)[:2]
 
         # Apply attention.
-        hidden_seqs = self.att(hidden_seqs)
+        hidden_seqs = self.att(hidden_seqs, feature_pad_mask)
         if isinstance(hidden_seqs, (tuple, list)):
             hidden_seqs, self.attw = hidden_seqs[0], hidden_seqs[1]
 
