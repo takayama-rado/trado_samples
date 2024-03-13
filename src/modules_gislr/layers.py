@@ -19,6 +19,8 @@ from __future__ import unicode_literals
 import math
 
 # Third party's modules
+import numpy as np
+
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -61,23 +63,44 @@ class Identity(nn.Module):
 class TemporalAttention(nn.Module):
     def __init__(self,
                  in_channels,
-                 attention_type):
+                 attention_type,
+                 post_scale):
         super().__init__()
-        assert attention_type in ["sigmoid", "softmax", "sig_soft"]
+        assert attention_type in ["sigmoid", "softmax"]
         self.linear = nn.Linear(in_channels, 1)
-        if attention_type == "sigmoid":
-            self.activation = nn.Sigmoid()
-        elif attention_type == "softmax":
-            self.activation = nn.Softmax(dim=1)
-        else:
-            self.activation = nn.Sequential(
-                nn.Sigmoid(),
-                nn.Softmax(dim=1))
+        self.attention_type = attention_type
 
-    def forward(self, feature):
+        if attention_type == "sigmoid":
+            self.scale_layer = nn.Sigmoid()
+        elif attention_type == "softmax":
+            self.scale_layer = nn.Softmax(dim=1)
+
+        self.neg_inf = None
+        self.post_scale = post_scale
+
+    def calc_attw(self, attw, mask):
+        # Initialize masking value.
+        if self.neg_inf is None:
+            self.neg_inf = float(np.finfo(
+                torch.tensor(0, dtype=attw.dtype).numpy().dtype).min)
+        if mask is not None:
+            attw = attw.masked_fill_(mask[:, :, None] == 0, self.neg_inf)
+        attw = self.scale_layer(attw)
+        if self.post_scale:
+            if mask is None:
+                tlength = torch.tensor(attw.shape[1], dtype=attw.dtype, device=attw.device)
+                tlength = tlength.reshape([1, 1, 1])
+            else:
+                tlength = mask.sum(dim=1)
+                tlength = tlength.reshape([-1, 1, 1])
+            scale = tlength / attw.sum(dim=1, keepdims=True)
+            attw = attw * scale
+        return attw
+
+    def forward(self, feature, mask=None):
         # `[N, T, C]`
         attw = self.linear(feature)
-        attw = self.activation(attw)
+        attw = self.calc_attw(attw, mask)
         feature = attw * feature
         return feature, attw
 
