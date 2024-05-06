@@ -266,22 +266,25 @@ class RandomHorizontalFlip():
       - apply_ratio: The ratio to apply augmentation.
       - num_joints: The number of input joints.
       - swap_pairs: The pairs of exchanged joint indices.
-      - basewidth: The width of the image whose joints are extracted from.
+      - flip_center: The center position of horizontal flipping.
         The swapped joints are calculated as bellow.
-        swapped_x = -orig_x + basewidth
+        swapped_x = -(orig_x - flip_center) + flip_center
+                  = -orig_x + 2*flip_center
       - feature_dim: The expected dimension of each joint.
       - include_conf: If True, we assume each joint includes confidence value
         after the coordinates.
+      - post_offset_x: The offset translation in the post process.
+        This intended to adjust flip center.
     """
     def __init__(self,
                  apply_ratio: float,
                  num_joints: int,
                  swap_pairs: List[List[int]],
-                 basewidth: int,
+                 flip_center: float = 0.5,
                  feature_dim: int = 2,
                  include_conf: bool = True) -> None:
         self.apply_ratio = apply_ratio
-        self.basewidth = basewidth
+        self.flip_center = flip_center
         self.feature_dim = feature_dim + 1 if include_conf else feature_dim
 
         indices = np.arange(0, num_joints, 1)
@@ -307,7 +310,7 @@ class RandomHorizontalFlip():
         # Filter out when all elements == 0.
         # (it should be confidence == 0).
         row_indices = np.where((temp == 0).all(axis=0) == np.True_)[0]
-        temp[0, :] = -temp[0, :] + self.basewidth
+        temp[0, :] = -temp[0, :] + 2 * self.flip_center
         temp[:, row_indices] = np.array([0] * self.feature_dim)[:, None]
         temp = temp.reshape(shape)
         temp = temp[:, :, self.swap_indices]
