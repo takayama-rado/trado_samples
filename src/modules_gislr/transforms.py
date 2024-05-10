@@ -329,14 +329,18 @@ class RandomClip():
     # Args:
       - apply_ratio: The ratio to apply augmentation.
       - clip_range: The range of clipping.
+      - offset: The offset of clip range.
+        if offset < 0, this is determined randomly.
       - min_apply_size: The minimum temporal length to apply augmentation.
     """
     def __init__(self,
                  apply_ratio,
                  clip_range,
+                 offset=-1,
                  min_apply_size=10):
         self.apply_ratio = apply_ratio
         self.clip_range = clip_range
+        self.offset = offset
         self.min_apply_size = min_apply_size
 
     def __call__(self,
@@ -350,11 +354,14 @@ class RandomClip():
         base_timelen = feature.shape[1]
         if base_timelen > self.min_apply_size:
             aug_tscale = np.random.random() * (self.clip_range[1] - self.clip_range[0]) + self.clip_range[0]
-            aug_timelen = int(base_timelen * aug_tscale)
+            aug_timelen = int(base_timelen * (1 - aug_tscale))
             if aug_timelen < base_timelen:
-                offset = np.random.randint(0, base_timelen - aug_timelen)
+                if self.offset < 0:
+                    offset = np.random.randint(0, base_timelen - aug_timelen)
+                else:
+                    offset = self.offset
                 # `[C, T, J]`
-                feature = feature[:, offset: aug_timelen + offset]
+                feature = feature[:, offset: aug_timelen + offset, :]
 
         data["feature"] = feature
         return data
