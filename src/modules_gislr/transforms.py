@@ -571,6 +571,71 @@ class PartsBasedTemporalInterpolation():
         return f"{self.__class__.__name__}:{self.__dict__}"
 
 
+class AlignWrist():
+    """Apply aligning wrist.
+    """
+    def __init__(self,
+                 apply_ratio=1.0,
+                 pose_lwrist=76+21+4,
+                 pose_rwrist=76+21+5,
+                 lhand_head=76,
+                 lhand_num=21,
+                 lhand_wrist=76,
+                 rhand_head=76+21+12,
+                 rhand_num=21,
+                 rhand_wrist=76+21+12):
+        self.apply_ratio = apply_ratio
+        self.pose_lwrist = pose_lwrist
+        self.pose_rwrist = pose_rwrist
+        self.lhand_head = lhand_head
+        self.lhand_num = lhand_num
+        self.lhand_wrist = lhand_wrist
+        self.rhand_head = rhand_head
+        self.rhand_num = rhand_num
+        self.rhand_wrist = rhand_wrist
+
+    def _gen_tmask(self, feature):
+        tmask = feature == 0.0
+        tmask = np.all(tmask, axis=(0, 2))
+        tmask = np.logical_not(tmask)
+        return tmask
+
+    def __call__(self,
+                 data: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute alignment.
+        """
+        if random.random() > self.apply_ratio:
+            return data
+
+        feature = data["feature"]
+        pose_lw = feature[:, :, self.pose_lwrist: self.pose_lwrist+1]
+        pose_rw = feature[:, :, self.pose_rwrist: self.pose_rwrist+1]
+        lhand_w = feature[:, :, self.lhand_wrist: self.lhand_wrist+1]
+        rhand_w = feature[:, :, self.rhand_wrist: self.rhand_wrist+1]
+        lhand = feature[:, :, self.lhand_head: self.lhand_head+self.lhand_num]
+        rhand = feature[:, :, self.rhand_head: self.rhand_head+self.rhand_num]
+
+        tmask_l = self._gen_tmask(lhand)
+        tmask_r = self._gen_tmask(rhand)
+
+        diff_l = lhand_w - pose_lw
+        diff_r = rhand_w - pose_rw
+        # Do not align if tracking is failed.
+        diff_l *= tmask_l[None, :, None]
+        diff_r *= tmask_r[None, :, None]
+
+        lhand -= diff_l
+        rhand -= diff_r
+        feature[:, :, self.lhand_head: self.lhand_head+self.lhand_num] = lhand
+        feature[:, :, self.rhand_head: self.rhand_head+self.rhand_num] = rhand
+
+        data["feature"] = feature
+        return data
+
+    def __str__(self):
+        return f"{self.__class__.__name__}:{self.__dict__}"
+
+
 def get_affine_matrix_2d(center,
                          trans,
                          scale,
@@ -1006,6 +1071,7 @@ Mappings = {
     "select_landmarks_and_feature": SelectLandmarksAndFeature,
     "parts_based_normalization": PartsBasedNormalization,
     "parts_based_interpolation": PartsBasedTemporalInterpolation,
+    "align_wrist": AlignWrist,
     "to_tensor": ToTensor,
     "random_horizontal_flip": RandomHorizontalFlip,
     "random_clip": RandomClip,
