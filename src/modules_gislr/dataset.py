@@ -289,7 +289,7 @@ class DataLoaderSettings():
             val_dataset, batch_size=self.batch_size, collate_fn=merge_fn,
             shuffle=False)
         self.test_dataloader = DataLoader(
-            test_dataset, batch_size=self.batch_size, collate_fn=merge_fn,
+            test_dataset, batch_size=1, collate_fn=merge_fn,
             shuffle=False)
 
         # Set estimated feature size.
