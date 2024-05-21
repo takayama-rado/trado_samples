@@ -415,14 +415,18 @@ class RandomTimeWarping():
       - apply_ratio: The ratio to apply augmentation.
       - scale_range: The range of scale to warp sequence.
       - min_apply_size: The minimum temporal length to apply augmentation.
+      - apply_post_mask: If True, mask out interpolated frames between
+        (x, y) == (0, 0) and others in the post-process.
     """
     def __init__(self,
                  apply_ratio,
                  scale_range,
-                 min_apply_size):
+                 min_apply_size,
+                 apply_post_mask=False):
         self.apply_ratio = apply_ratio
         self.scale_range = scale_range
         self.min_apply_size = min_apply_size
+        self.apply_post_mask = apply_post_mask
 
     def __call__(self,
                  data: Dict[str, Any]) -> Dict[str, Any]:
@@ -432,6 +436,13 @@ class RandomTimeWarping():
             return data
 
         feature = data["feature"]
+        if self.apply_post_mask:
+            temp = feature.reshape([feature.shape[0], -1])
+            mask = (temp == 0).all(axis=0).reshape(
+                [1, feature.shape[1], feature.shape[2]])
+            mask = np.bitwise_not(mask).astype(feature.dtype)
+        else:
+            mask = None
         orig_shape = feature.shape
         tlen = orig_shape[1]
         if tlen > self.min_apply_size:
@@ -448,6 +459,19 @@ class RandomTimeWarping():
             # `[T, C*J] -> [T, C, J] -> [C, T, J]`
             newfeature = newfeature.reshape([-1, orig_shape[0], orig_shape[2]])
             newfeature = newfeature.transpose([1, 0, 2])
+            if mask is not None:
+                # `[1, T, J] -> [T, 1*J]`
+                mask = mask.transpose([1, 0, 2]).reshape([tlen, -1])
+                assert len(mask.shape) == 2, f"{mask.shape}"
+                newmask = matrix_interp(x, xs, mask)
+                # `[T, 1*J] -> [T, 1, J] -> [1, T, J]`
+                newmask = newmask.reshape([-1, 1, orig_shape[2]])
+                newmask = newmask.transpose([1, 0, 2])
+                # `[1, T, J] -> [C, T, J]`
+                newmask = np.repeat(newmask, orig_shape[0], axis=0)
+                # Masked out interpolated position.
+                newmask[newmask < 0.95] = 0.0
+                newfeature *= newmask
         else:
             newfeature = feature
 
