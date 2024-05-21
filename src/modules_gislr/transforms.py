@@ -338,6 +338,10 @@ class RandomClip():
                  clip_range,
                  offset=-1,
                  min_apply_size=10):
+        assert apply_ratio >= 0.0 and apply_ratio <= 1.0, f"{apply_ratio}"
+        assert clip_range[0] <= clip_range[1], f"{clip_range}"
+        assert clip_range[0] >= 0.0 and clip_range[0] < 1.0, f"{clip_range}"
+        assert clip_range[1] >= 0.0 and clip_range[1] < 1.0, f"{clip_range}"
         self.apply_ratio = apply_ratio
         self.clip_range = clip_range
         self.offset = offset
