@@ -482,6 +482,95 @@ class RandomTimeWarping():
         return f"{self.__class__.__name__}:{self.__dict__}"
 
 
+class PartsBasedTemporalInterpolation():
+    """Apply parts-based temporal interpolation.
+    """
+
+    def __init__(self,
+                 apply_ratio=1.0,
+                 face_head=0,
+                 face_num=76,
+                 lhand_head=76,
+                 lhand_num=21,
+                 pose_head=76+21,
+                 pose_num=12,
+                 rhand_head=76+21+12,
+                 rhand_num=21,
+                 accept_correct_ratio=0.1) -> None:
+        self.apply_ratio = apply_ratio
+        self.face_head = face_head
+        self.face_num = face_num
+        self.lhand_head = lhand_head
+        self.lhand_num = lhand_num
+        self.pose_head = pose_head
+        self.pose_num = pose_num
+        self.rhand_head = rhand_head
+        self.rhand_num = rhand_num
+        self.accept_correct_ratio = accept_correct_ratio
+
+    def _gen_tmask(self, feature):
+        tmask = feature == 0.0
+        tmask = np.all(tmask, axis=(0, 2))
+        tmask = np.logical_not(tmask)
+        return tmask
+
+    def _interp(self, feature):
+        tmask = self._gen_tmask(feature)
+        # `[C, T, J]`
+        orig_shape = feature.shape
+        tlength = orig_shape[1]
+        # No failed tracking.
+        if tmask.sum() == tlength:
+            return feature
+        # Too many failed.
+        if tmask.sum() < self.accept_correct_ratio:
+            return feature
+
+        x = np.arange(tlength)
+        xs = np.where(tmask != 0)[0]
+        # `[C, T, J] -> [T, C*J]`
+        feature = feature.transpose([1, 0, 2]).reshape([tlength, -1])
+        ys = feature[xs, :]
+
+        newfeature = matrix_interp(x, xs, ys)
+        # `[T, C*J] -> [T, C, J] -> [C, T, J]`
+        newfeature = newfeature.reshape([-1, orig_shape[0], orig_shape[2]])
+        newfeature = newfeature.transpose([1, 0, 2])
+        assert np.isnan(newfeature).any() == np.False_
+        assert np.isinf(newfeature).any() == np.False_
+        return newfeature
+
+    def __call__(self,
+                 data: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute interpolation.
+        """
+        if random.random() > self.apply_ratio:
+            return data
+
+        feature = data["feature"]
+        if self.face_num > 0:
+            face = feature[:, :, self.face_head: self.face_head+self.face_num]
+            face = self._interp(face)
+            feature[:, :, self.face_head: self.face_head+self.face_num] = face
+        if self.lhand_num > 0:
+            lhand = feature[:, :, self.lhand_head: self.lhand_head+self.lhand_num]
+            lhand = self._interp(lhand)
+            feature[:, :, self.lhand_head: self.lhand_head+self.lhand_num] = lhand
+        if self.pose_num > 0:
+            pose = feature[:, :, self.pose_head: self.pose_head+self.pose_num]
+            pose = self._interp(pose)
+            feature[:, :, self.pose_head: self.pose_head+self.pose_num] = pose
+        if self.rhand_num > 0:
+            rhand = feature[:, :, self.rhand_head: self.rhand_head+self.rhand_num]
+            rhand = self._interp(rhand)
+            feature[:, :, self.rhand_head: self.rhand_head+self.rhand_num] = rhand
+        data["feature"] = feature
+        return data
+
+    def __str__(self):
+        return f"{self.__class__.__name__}:{self.__dict__}"
+
+
 def get_affine_matrix_2d(center,
                          trans,
                          scale,
@@ -916,6 +1005,7 @@ Mappings = {
     "replace_nan": ReplaceNan,
     "select_landmarks_and_feature": SelectLandmarksAndFeature,
     "parts_based_normalization": PartsBasedNormalization,
+    "parts_based_interpolation": PartsBasedTemporalInterpolation,
     "to_tensor": ToTensor,
     "random_horizontal_flip": RandomHorizontalFlip,
     "random_clip": RandomClip,
