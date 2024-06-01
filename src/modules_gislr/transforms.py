@@ -344,6 +344,7 @@ class RandomClip():
         assert clip_range[1] >= 0.0 and clip_range[1] < 1.0, f"{clip_range}"
         self.apply_ratio = apply_ratio
         self.clip_range = clip_range
+
         self.offset = offset
         self.min_apply_size = min_apply_size
 
@@ -667,6 +668,7 @@ def get_affine_matrix_2d(center,
     trans_m = np.array([[1, 0, move[0]],
                         [0, 1, move[1]],
                         [0, 0, 1]])
+
     mat = np.identity(3, dtype=dtype)
     for name in order:
         if name == "center":
@@ -682,11 +684,17 @@ def get_affine_matrix_2d(center,
     return mat.astype(dtype)
 
 
-def apply_affine(inputs, mat):
+def apply_affine(inputs, mat, channel_first=True):
+    if channel_first:
+        # `[C, T, J] -> [T, J, C]`
+        inputs = inputs.transpose([1, 2, 0])
     xy = inputs[:, :, :2]
     xy = np.concatenate([xy, np.ones([xy.shape[0], xy.shape[1], 1])], axis=-1)
     xy = np.einsum("...j,ij", xy, mat)
     inputs[:, :, :2] = xy[:, :, :-1]
+    if channel_first:
+        # `[T, J, C] -> [C, T, J]`
+        inputs = inputs.transpose([2, 0, 1])
     return inputs
 
 
@@ -694,21 +702,27 @@ class RandomAffineTransform2D():
     def __init__(self,
                  apply_ratio,
                  center_joints,
+                 target_joints,
                  trans_range,
                  scale_range,
                  rot_range,
                  skew_range,
+                 channel_first=True,
+                 apply_post_mask=True,
                  random_seed=None,
                  order=["center", "scale", "rot", "skew", "trans"],
                  dtype=np.float32):
         self.apply_ratio = apply_ratio
         self.center_joints = center_joints
+        self.target_joints = target_joints
         self.trans_range = trans_range
         self.scale_range = scale_range
         self.rot_range = np.radians(rot_range)
         self.skew_range = np.radians(skew_range)
         self.order = order
         self.dtype = dtype
+        self.channel_first = channel_first
+        self.apply_post_mask = apply_post_mask
         if random_seed is not None:
             self.rng = np.random.default_rng(random_seed)
         else:
@@ -741,7 +755,18 @@ class RandomAffineTransform2D():
             to_radians=False, order=self.order, dtype=self.dtype)
 
         # Apply transform.
-        feature = apply_affine(feature, mat)
+        if self.apply_post_mask:
+            temp = feature.reshape([feature.shape[0], -1])
+            mask = (temp == 0).all(axis=0).reshape(
+                [1, feature.shape[1], feature.shape[2]])
+            mask = np.bitwise_not(mask).astype(feature.dtype)
+        else:
+            mask = None
+        target = feature[:, :, self.target_joints]
+        target = apply_affine(target, mat, self.channel_first)
+        feature[:, :, self.target_joints] = target
+        if mask is not None:
+            feature *= mask
         data["feature"] = feature
         return data
 
@@ -1077,6 +1102,10 @@ Mappings = {
     "random_clip": RandomClip,
     "random_time_warping": RandomTimeWarping,
     "random_affine_transform2d": RandomAffineTransform2D,
+    "random_affine_transform2d_face": RandomAffineTransform2D,
+    "random_affine_transform2d_lhand": RandomAffineTransform2D,
+    "random_affine_transform2d_pose": RandomAffineTransform2D,
+    "random_affine_transform2d_rhand": RandomAffineTransform2D,
     "random_noise": RandomNoise,
     "random_drop_joints": RandomDropJoints,
     "random_drop_face_or_pose": RandomDropFaceOrPose,
