@@ -775,7 +775,18 @@ class RandomNoise():
     """Add random noise to joints coordinates.
 
     # Args:
-      - stds: The standard deviation of noise distribution.
+      - apply_ratio: The ratio to apply augmentation.
+      - scale_range: The range to augment scale of noise distribution.
+      - scale_unit: The unit of scale. [asis/box_ratio]
+        - asis: In this mode, the assigned `scale` value is used directly.
+          So, the real noise value is calculated as,
+          noise = np.random.uniform(low=-scale, high=scale)
+        - box_ratio: In this mode, the `scale` value is assumed to indicate the
+          ratio of rounded box (of diagonal) of target_joints.
+          So, the real noise value is calculated as,
+          scale = BoxSize(target_joint) * scale,
+          noise = np.random.uniform(low=-scale, high=scale)
+      - noise_type: The type of noise distribution [uniform/gauss].
       - target_joints: If defined, the noise is added only to target_joints.
       - feature_dim: The expected dimension of each joint.
       - include_conf: If True, we assume each joint includes confidence value
@@ -783,19 +794,19 @@ class RandomNoise():
     """
     def __init__(self,
                  apply_ratio,
-                 stds,
+                 scale_range,
+                 scale_unit="asis",
+                 noise_type="uniform",
                  target_joints=None,
                  feature_dim=3,
                  include_conf=True):
+        assert noise_type in ["uniform", "gauss"]
         self.apply_ratio = apply_ratio
+        self.scale_range = np.array(scale_range)
+        self.scale_unit = scale_unit
+        self.noise_type = noise_type
         self.feature_dim = feature_dim
         self.include_conf = include_conf
-        if isinstance(stds, (float, int)):
-            self.stds = [float(stds)]
-        else:
-            self.stds = stds
-        if target_joints is not None:
-            assert len(self.stds) == len(target_joints)
         self.target_joints = target_joints
 
     def __call__(self,
@@ -812,16 +823,33 @@ class RandomNoise():
         else:
             confs = None
 
-        mask = np.all(feature != 0.0, axis=0)[None, :, :]
-        if self.target_joints is None:
-            feature += np.random.normal(size=feature.shape,
-                                        scale=self.stds[0])
+        # `[C, T, J]`
+        target = feature[:, :, self.target_joints]
+        # Generate mask to prevent adding noise to failed tracking.
+        temp = target.reshape([target.shape[0], -1])
+        bmask = (temp == 0).all(axis=0)
+        bmask = np.bitwise_not(bmask)
+        if bmask.any() == np.False_:
+            return data
+        # Calculate real scale.
+        if self.scale_unit == "box_ratio":
+            mins = temp[:, bmask].min(axis=1)
+            maxes = temp[:, bmask].max(axis=1)
+            size = np.linalg.norm(maxes - mins)
+            scale_range = size * self.scale_range
         else:
-            for std, target in zip(self.stds, self.target_joints):
-                feature[:, :, target] += np.random.normal(
-                    size=feature[:, :, target].shape, scale=std)
-        # Filter out noise to zero.
-        feature *= mask
+            scale_range = self.scale_range
+        aug_scale = np.random.random() * (scale_range[1] - scale_range[0]) + scale_range[0]
+        # Mask for post-process.
+        mask = bmask.reshape(
+            [1, target.shape[1], target.shape[2]]).astype(target.dtype)
+        if self.noise_type == "uniform":
+            target += np.random.uniform(low=-aug_scale, high=aug_scale, size=target.shape)
+        elif self.noise_type == "gauss":
+            target += np.random.normal(loc=0.0, scale=aug_scale, size=target.shape)
+        # Filter out failed tracking to zero.
+        target *= mask
+        feature[:, :, self.target_joints] = target
         # Back confidence.
         if confs is not None:
             feature = np.concatenate([feature, confs], axis=0)
@@ -1107,6 +1135,10 @@ Mappings = {
     "random_affine_transform2d_pose": RandomAffineTransform2D,
     "random_affine_transform2d_rhand": RandomAffineTransform2D,
     "random_noise": RandomNoise,
+    "random_noise_face": RandomNoise,
+    "random_noise_lhand": RandomNoise,
+    "random_noise_pose": RandomNoise,
+    "random_noise_rhand": RandomNoise,
     "random_drop_joints": RandomDropJoints,
     "random_drop_face_or_pose": RandomDropFaceOrPose,
     "random_drop_hand": RandomDropHand,
