@@ -30,6 +30,7 @@ from torch.nn import functional as F
 # Local modules
 from .utils import (
     make_san_mask,
+    make_causal_mask,
     select_reluwise_activation)
 
 # Execution settings
@@ -657,6 +658,7 @@ class TransformerEnISLR(nn.Module):
                  inter_channels,
                  out_channels,
                  activation="relu",
+                 pooling_type="none",
                  tren_num_layers=1,
                  tren_num_heads=1,
                  tren_dim_ffw=256,
@@ -671,6 +673,19 @@ class TransformerEnISLR(nn.Module):
         # Feature extraction.
         self.linear = nn.Linear(in_channels, inter_channels)
         self.activation = select_reluwise_activation(activation)
+
+        if pooling_type == "none":
+            self.pooling = Identity()
+        elif pooling_type == "average":
+            self.pooling = nn.AvgPool2d(
+                kernel_size=[2, 1],
+                stride=[2, 1],
+                padding=0)
+        elif pooling_type == "max":
+            self.pooling = nn.MaxPool2d(
+                kernel_size=[2, 1],
+                stride=[2, 1],
+                padding=0)
 
         # Transformer-Encoder.
         enlayer = TransformerEncoderLayer(
@@ -710,6 +725,18 @@ class TransformerEnISLR(nn.Module):
         feature = self.activation(feature)
         if torch.isnan(feature).any():
             raise ValueError()
+
+        # Apply pooling.
+        feature = self.pooling(feature)
+        if feature_pad_mask is not None:
+            # Cast to apply pooling.
+            feature_pad_mask = feature_pad_mask.to(feature.dtype)
+            feature_pad_mask = self.pooling(feature_pad_mask.unsqueeze(-1)).squeeze(-1)
+            # Binarization.
+            # This removes averaged signals with padding.
+            feature_pad_mask = feature_pad_mask > 0.5
+            if feature_causal_mask is not None:
+                feature_causal_mask = make_causal_mask(feature_pad_mask)
 
         feature = self.tr_encoder(
             feature=feature,
