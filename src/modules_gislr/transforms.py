@@ -861,145 +861,142 @@ class RandomNoise():
         return f"{self.__class__.__name__}:{self.__dict__}"
 
 
-class RandomDropJoints():
-    def __init__(self,
-                 apply_ratio,
-                 drop_joints):
-        self.apply_ratio = apply_ratio
-        self.drop_joints = drop_joints
-
-    def __call__(self,
-                 data: Dict[str, Any]) -> Dict[str, Any]:
-        if random.random() > self.apply_ratio:
-            return data
-
-        # `[C, T, J]`
-        feature = copy.deepcopy(data["feature"])
-        feature[:, :, self.drop_joints] = 0.0
-        # Avoid to drop all signals.
-        if not (feature == 0.0).all():
-            data["feature"] = feature
-        return data
-
-
-class RandomDropFaceOrPose():
+class RandomDropParts():
     def __init__(self,
                  apply_ratio,
                  face_head=0,
                  face_num=len(USE_FACE),
+                 lhand_head=len(USE_FACE),
+                 lhand_num=len(USE_LHAND),
                  pose_head=len(USE_FACE)+len(USE_LHAND),
-                 pose_num=len(USE_POSE)):
-        landmarks, _ = get_fullbody_landmarks()
-        face_joints = landmarks[face_head: face_head + face_num]
-        pose_joints = landmarks[pose_head: pose_head + pose_num]
-        self.apply_ratio = apply_ratio
-
-        self.drop_face = RandomDropJoints(
-            apply_ratio=1.0,
-            drop_joints=face_joints)
-        self.drop_pose = RandomDropJoints(
-            apply_ratio=1.0,
-            drop_joints=pose_joints)
-
-    def __call__(self,
-                 data: Dict[str, Any]) -> Dict[str, Any]:
-
-        rval = random.random()
-        if rval <= self.apply_ratio:
-            if rval <= self.apply_ratio / 2:
-                data = self.drop_face(data)
-            else:
-                data = self.drop_pose(data)
-        return data
-
-
-class RandomDropHand():
-    def __init__(self,
-                 apply_ratio,
-                 lhand_head=len(USE_FACE),
-                 lhand_num=len(USE_LHAND),
-                 rhand_head=len(USE_FACE) + len(USE_LHAND) + len(USE_POSE),
-                 rhand_num=len(USE_RHAND)):
-        landmarks, _ = get_fullbody_landmarks()
-        lhand_joints = landmarks[lhand_head: lhand_head + lhand_num]
-        rhand_joints = landmarks[rhand_head: rhand_head + rhand_num]
-        hand_joints = np.concatenate([lhand_joints, rhand_joints])
-        self.apply_ratio = apply_ratio
-        self.drop_hand = RandomDropJoints(
-            apply_ratio=1.0,
-            drop_joints=hand_joints)
-
-    def __call__(self,
-                 data: Dict[str, Any]) -> Dict[str, Any]:
-        if random.random() > self.apply_ratio:
-            return data
-        return self.drop_hand(data)
-
-
-class RandomDropFingers():
-    def __init__(self,
-                 apply_ratio,
-                 lhand_head=len(USE_FACE),
-                 lhand_num=len(USE_LHAND),
-                 rhand_head=len(USE_FACE) + len(USE_LHAND) + len(USE_POSE),
+                 pose_num=len(USE_POSE),
+                 rhand_head=len(USE_FACE)+len(USE_LHAND)+len(USE_POSE),
                  rhand_num=len(USE_RHAND),
-                 drop_tsize=(0.1, 0.2),
-                 num_drop_fingers=(2, 6),
-                 num_drops=(2, 3)):
-        self.lhand_head = lhand_head
-        self.lhand_num = lhand_num
-        self.rhand_head = rhand_head
-        self.rhand_num = rhand_num
-        self.apply_ratio = apply_ratio
-        self.drop_tsize = drop_tsize
-        self.num_drop_fingers = num_drop_fingers
-        self.num_drops = num_drops
+                 relative_drop_freq=None):
+        targets = []
+        if face_head is not None:
+            targets.append("face")
+        if lhand_head is not None:
+            targets.append("lhand")
+        if pose_head is not None:
+            targets.append("pose")
+        if rhand_head is not None:
+            targets.append("rhand")
 
-        lhand_indices = np.arange(lhand_head, lhand_head+lhand_num)
-        rhand_indices = np.arange(rhand_head, rhand_head+rhand_num)
-        self.hand_indices = np.concatenate([lhand_indices, rhand_indices], axis=0)
+        if relative_drop_freq is not None:
+            message = f"relative_drop_freq:{relative_drop_freq}, targets:{targets}"
+            assert len(relative_drop_freq) == len(targets), message
+            temp = np.array(relative_drop_freq)
+            temp = np.cumsum(temp / temp.sum())
+            self.relative_drop_ratio = temp * apply_ratio
+        else:
+            self.relative_drop_ratio = np.array([0.25]*len(targets))
+
+        self.apply_ratio = apply_ratio
+        self.face_joints = np.arange(face_head, face_head + face_num) if "face" in targets \
+            else None
+        self.lhand_joints = np.arange(lhand_head, lhand_head + lhand_num) if "lhand" in targets \
+            else None
+        self.pose_joints = np.arange(pose_head, pose_head + pose_num) if "pose" in targets \
+            else None
+        self.rhand_joints = np.arange(rhand_head, rhand_head + rhand_num) if "rhand" in targets \
+            else None
+        self.targets = targets
 
     def __call__(self,
                  data: Dict[str, Any]) -> Dict[str, Any]:
-        if random.random() > self.apply_ratio:
+        rval = random.random()
+        if rval > self.apply_ratio:
             return data
 
-        feature = copy.deepcopy(data["feature"])
-        tlength = feature.shape[1]
-        num_drops = np.random.randint(low=self.num_drops[0], high=self.num_drops[1])
-        num_drop_fingers = np.random.randint(
-            low=self.num_drop_fingers[0],
-            high=self.num_drop_fingers[1],
-            size=num_drops)
-        offset = 0
-        for i, drop in enumerate(num_drop_fingers):
-            drop_indices = np.random.random(drop) * (len(self.hand_indices) -1)
-            drop_indices = np.unique(np.sort(np.round(drop_indices)))
-            drop_indices = np.where(drop_indices < self.lhand_num,
-                drop_indices + self.lhand_head,
-                drop_indices + self.rhand_head - self.lhand_num)
-            maxval = int(tlength / num_drops * (i+1))
-            maxval = max(maxval, 1)
-            start = int(np.round(np.random.randint(low=offset, high=maxval)))
-            tsize = np.random.random() * (self.drop_tsize[1] - self.drop_tsize[0]) + self.drop_tsize[0]
-            end = int(np.round(tsize * tlength + start))
-            start = min(start, tlength-1)
-            end = min(end, tlength)
-            feature[:, start:end, drop_indices.astype(np.int32)] = 0.0
+        lower_bound = 0
+        feature = data["feature"]
+        mask = (feature == 0).all(axis=0)
+        mask = np.bitwise_not(mask)
+        mask = np.expand_dims(mask, 0)
+        for target, ratio in zip(self.targets, self.relative_drop_ratio):
+            if target == "face":
+                target_joints = self.face_joints
+            elif target == "lhand":
+                target_joints = self.lhand_joints
+            elif target == "pose":
+                target_joints = self.pose_joints
+            elif target == "rhand":
+                target_joints = self.rhand_joints
+            if rval >= lower_bound and rval < ratio:
+                mask[:, :, target_joints] = 0.0
+                break
+            else:
+                lower_bound = ratio
+        if not (mask == 0.0).all():
+            feature *= mask
 
-            offset = end
-        # Avoid to drop all signals.
-        if not (feature == 0.0).all():
-            data["feature"] = feature
+        # For debug.
+        # mask = mask.astype(np.uint8)
+        # mask *= 255
+        # print(mask.shape)
+        # cv2.imwrite("out.png", np.expand_dims(mask, axis=-1))
+
+        data["feature"] = feature
         return data
 
 
-class RandomSpatialMasking():
+class RandomDropJoints():
+    def __init__(self,
+                 apply_ratio,
+                 drop_ratio,
+                 undrop_joints=None,
+                 drop_tsize=1):
+        self.apply_ratio = apply_ratio
+        self.drop_ratio = drop_ratio
+        self.undrop_joints = undrop_joints
+        assert drop_tsize % 2 == 1
+        self.kernel = np.array([[1] * drop_tsize], dtype=np.uint8).T
+
+    def __call__(self,
+                 data: Dict[str, Any]) -> Dict[str, Any]:
+
+        if random.random() > self.apply_ratio:
+            return data
+
+        feature = data["feature"]
+        mask = (feature == 0).all(axis=0)
+        mask = np.bitwise_not(mask)
+        undrop = np.random.random(mask.shape)
+        undrop[undrop >= self.drop_ratio] = 1.0
+        undrop[undrop < self.drop_ratio] = 0.0
+        temp = undrop.astype(np.uint8)
+
+        temp = cv2.erode(temp, self.kernel)
+        undrop = np.expand_dims(temp, axis=0)
+
+        if self.undrop_joints is not None:
+            undrop[:, :, self.undrop_joints] = 1.0
+        mask = np.bitwise_and(mask, undrop)
+        if not (mask == 0.0).all():
+            feature *= mask
+
+        # For debug.
+        # mask = mask.astype(np.uint8)
+        # mask *= 255
+        # print(mask.shape)
+        # cv2.imwrite("out.png", np.expand_dims(mask, axis=-1))
+
+        data["feature"] = feature
+        return data
+
+
+class RandomDropSpatial():
     def __init__(self,
                  apply_ratio=1.0,
-                 size=(0.2, 0.4)):
+                 size=(0.2, 0.4),
+                 offsets=None,
+                 smask_as="obstacle"):
         self.apply_ratio = apply_ratio
         self.size = size
+        self.offsets = offsets
+        assert smask_as in ["obstacle", "window"]
+        self.smask_as = smask_as
 
     def __call__(self,
                  data: Dict[str, Any]) -> Dict[str, Any]:
@@ -1007,6 +1004,10 @@ class RandomSpatialMasking():
             return data
 
         feature = copy.deepcopy(data["feature"])
+        mask = (feature == 0).all(axis=0)
+        mask = np.bitwise_not(mask)
+
+        # Maximum spatial range.
         minimums = np.min(feature, axis=(1, 2))
         maximums = np.max(feature, axis=(1, 2))
 
@@ -1015,40 +1016,56 @@ class RandomSpatialMasking():
         max_x = maximums[0]
         max_y = maximums[1]
 
+        # Calculate drop rectangle.
+        if self.offsets is None:
+            dr_offset_x = np.random.random() * (max_x - min_x) + min_x
+            dr_offset_y = np.random.random() * (max_y - min_y) + min_y
+        else:
+            dr_offset_x = self.offsets[0] * (max_x - min_x) + min_x
+            dr_offset_y = self.offsets[1] * (max_y - min_y) + min_y
+
+        dr_size = np.random.random() * (self.size[1] - self.size[0]) + self.size[0]
+        dr_size_x = (max_x - min_x) * dr_size
+        dr_size_y = (max_y - min_y) * dr_size
+
+        # Undrop in the window.
+        udr_x = (dr_offset_x <= feature[0, :, :])
+        udr_x = np.bitwise_and(udr_x, (feature[0, :, :] <= (dr_offset_x + dr_size_x)))
+        udr_y = (dr_offset_y <= feature[1, :, :])
+        udr_y = np.bitwise_and(udr_y, (feature[1, :, :] <= (dr_offset_y + dr_size_y)))
+        undrop = np.bitwise_and(udr_x, udr_y)
+
         if minimums.shape[0] == 3:
             min_z = minimums[2]
             max_z = minimums[2]
-        else:
-            min_z = None
-            max_z = None
+            if self.offsets is None:
+                dr_offset_z = np.random.random() * (max_z - min_z) + min_z
+            else:
+                dr_offset_z = self.offsets[2] * (max_z - min_z) + min_z
+            dr_size_z = (max_z - min_z) * dr_size
+            # Drop in the window.
+            udr_z = (dr_offset_z <= feature[2, :, :])
+            udr_z = np.bitwise_and(udr_z, (feature[2, :, :] <= (dr_offset_z + dr_size_z)))
+            undrop = np.bitwise_and(undrop, udr_z)
 
-        mask_offset_x = np.random.random() * (max_x - min_x) + min_x
-        mask_offset_y = np.random.random() * (max_y - min_y) + min_y
+        # Inverse undrop mask to interpret spatial mask as window.
+        if self.smask_as == "obstacle":
+            undrop = np.bitwise_not(undrop)
 
-        mask_size = np.random.random() * (self.size[1] - self.size[0]) + self.size[0]
-        mask_size_x = (max_x - min_x) * mask_size
-        mask_size_y = (max_y - min_y) * mask_size
+        mask = np.bitwise_and(mask, undrop)
+        if not (mask == 0.0).all():
+            feature *= mask
 
-        mask_x = (mask_offset_x <= feature[0, :, :])
-        mask_x = mask_x * (feature[0, :, :] <= (mask_offset_x + mask_size_x))
-        mask_y = (mask_offset_y <= feature[1, :, :])
-        mask_y = mask_y * (feature[1, :, :] <= (mask_offset_y + mask_size_y))
-        mask = mask_x & mask_y
-        if min_z:
-            mask_offset_z = np.random.random() * (max_z - min_z) + min_z
-            mask_size_z = (max_z - min_z) * mask_size
-            mask_z = (mask_offset_z <= feature[2, :, :])
-            mask_z = mask_z * (feature[2, :, :] <= (mask_offset_z + mask_size_z))
-            mask = mask & mask_z
+        # For debug.
+        # mask = mask.astype(np.uint8)
+        # mask *= 255
+        # print(mask.shape)
+        # cv2.imwrite("out.png", np.expand_dims(mask, axis=-1))
 
-        feature = np.where(mask[None, ...], 0.0, feature)
-        # Avoid to drop all signals.
-        if not (feature == 0.0).all():
-            data["feature"] = feature
         return data
 
 
-class RandomTemporalMasking():
+class RandomDropTemporal():
     def __init__(self,
                  apply_ratio=1.0,
                  size=(0.1, 0.5)):
@@ -1060,7 +1077,9 @@ class RandomTemporalMasking():
         if random.random() > self.apply_ratio:
             return data
 
-        feature = copy.deepcopy(data["feature"])
+        feature = data["feature"]
+        mask = (feature == 0).all(axis=0)
+        mask = np.bitwise_not(mask)
 
         # Calculate drop range.
         tlength = feature.shape[1]
@@ -1071,11 +1090,19 @@ class RandomTemporalMasking():
         end = min(int(tlength * end), tlength)
 
         # Masking.
-        feature[:, start: end, :] = 0.0
+        mask[None, start: end, :] = 0.0
 
         # Avoid to drop all signals.
-        if not (feature == 0.0).all():
-            data["feature"] = feature
+        if not (mask == 0.0).all():
+            feature *= mask
+
+        # For debug.
+        # mask = mask.astype(np.uint8)
+        # mask *= 255
+        # print(mask.shape)
+        # cv2.imwrite("out.png", np.expand_dims(mask, axis=-1))
+
+        data["feature"] = feature
         return data
 
 
@@ -1139,12 +1166,10 @@ Mappings = {
     "random_noise_lhand": RandomNoise,
     "random_noise_pose": RandomNoise,
     "random_noise_rhand": RandomNoise,
+    "random_drop_parts": RandomDropParts,
     "random_drop_joints": RandomDropJoints,
-    "random_drop_face_or_pose": RandomDropFaceOrPose,
-    "random_drop_hand": RandomDropHand,
-    "random_drop_fingers": RandomDropFingers,
-    "random_spatial_masking": RandomSpatialMasking,
-    "random_temporal_masking": RandomTemporalMasking,
+    "random_drop_spatial": RandomDropSpatial,
+    "random_drop_temporal": RandomDropTemporal,
     "selective_resize": SelectiveResize}
 
 
