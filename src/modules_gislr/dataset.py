@@ -55,8 +55,10 @@ class HDF5Dataset(Dataset):
     def __init__(self,
                  hdf5files,
                  load_into_ram=False,
+                 convert_to_channel_first=False,
                  pre_transforms=None,
                  transforms=None):
+        self.convert_to_channel_first = convert_to_channel_first
         self.pre_transforms = pre_transforms
         self.load_into_ram = load_into_ram
         data_info = []
@@ -71,6 +73,11 @@ class HDF5Dataset(Dataset):
                     if load_into_ram:
                         data = {"feature": fread[key]["feature"][:],
                                 "token": fread[key]["token"][:]}
+                        if self.convert_to_channel_first:
+                            feature = data["feature"]
+                            # `[T, J, C] -> [C, T, J]`
+                            feature = np.transpose(feature, [2, 0, 1])
+                            data["feature"] = feature
                         if self.pre_transforms:
                             data = self.pre_transforms(data)
                     else:
@@ -117,8 +124,14 @@ class HDF5Dataset(Dataset):
                 data = {"feature": fread[info["data_key"]]["feature"][:],
                         "token": fread[info["data_key"]]["token"][:]}
         _data = copy.deepcopy(data)
-        if self.load_into_ram is False and self.pre_transforms:
-            _data = self.pre_transforms(_data)
+        if self.load_into_ram is False:
+            if self.convert_to_channel_first:
+                feature = _data["feature"]
+                # `[T, J, C] -> [C, T, J]`
+                feature = np.transpose(feature, [2, 0, 1])
+                _data["feature"] = feature
+            if self.pre_transforms:
+                _data = self.pre_transforms(_data)
         _data = self.transforms(_data)
         return _data
 
@@ -208,6 +221,7 @@ class DataLoaderSettings():
     val_pid: int = 16069
     test_pid: int = 16069
     include_swap: bool = False
+    convert_to_channel_first: bool = False
     dataset_dir: PurePath = field(default_factory=Path(""))
     key2token: Dict[str, int] = field(default_factory=lambda: {})
     token2key: Dict[int, str] = field(default_factory=lambda: {})
@@ -262,14 +276,17 @@ class DataLoaderSettings():
 
         # Create dataset.
         train_dataset = HDF5Dataset(train_hdf5files,
+            convert_to_channel_first=self.convert_to_channel_first,
             pre_transforms=pre_transforms,
             transforms=train_transforms,
             load_into_ram=self.load_into_ram)
         val_dataset = HDF5Dataset(val_hdf5files,
+            convert_to_channel_first=self.convert_to_channel_first,
             pre_transforms=pre_transforms,
             transforms=val_transforms,
             load_into_ram=self.load_into_ram)
         test_dataset = HDF5Dataset(test_hdf5files,
+            convert_to_channel_first=self.convert_to_channel_first,
             pre_transforms=pre_transforms,
             transforms=train_transforms,
             load_into_ram=self.load_into_ram)
