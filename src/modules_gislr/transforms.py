@@ -1108,7 +1108,7 @@ class RandomDropTemporal():
 
 class SelectiveResize():
     def __init__(self,
-                 min_tlen=10,
+                 min_tlen=8,
                  max_tlen=None):
         assert min_tlen is not None or max_tlen is not None
         self.min_tlen = min_tlen
