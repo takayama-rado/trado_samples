@@ -20,6 +20,8 @@ import time
 from inspect import signature
 
 # Third party's modules
+import numpy as np
+
 import torch
 
 # Local modules
@@ -34,7 +36,8 @@ DIR_INPUT = None
 DIR_OUTPUT = None
 
 
-def train_loop(dataloader, model, loss_fn, optimizer, device, use_mask=True):
+def train_loop(dataloader, model, loss_fn, optimizer, device, use_mask=True,
+               return_pred_times=False):
     num_batches = len(dataloader)
     train_loss = 0
     size = len(dataloader.dataset)
@@ -42,6 +45,9 @@ def train_loop(dataloader, model, loss_fn, optimizer, device, use_mask=True):
     # Inspect model signature.
     sig = signature(model.forward)
     use_mask = True if "feature_pad_mask" in sig.parameters and use_mask is True else False
+
+    # Collect prediction time.
+    pred_times = []
 
     # Switch to training mode.
     model.train()
@@ -53,14 +59,19 @@ def train_loop(dataloader, model, loss_fn, optimizer, device, use_mask=True):
         token = batch_sample["token"]
         feature = feature.to(device)
         token = token.to(device)
+        frames = feature.shape[-2]
 
         # Predict.
+        pred_start = time.perf_counter()
         if use_mask:
             feature_pad_mask = batch_sample["feature_pad_mask"]
             feature_pad_mask = feature_pad_mask.to(device)
             pred = model(feature, feature_pad_mask=feature_pad_mask)
         else:
             pred = model(feature)
+        pred_end = time.perf_counter()
+        pred_times.append([frames, pred_end - pred_start])
+
         # Compute loss.
         loss = loss_fn(pred, token.squeeze(-1))
 
@@ -81,16 +92,22 @@ def train_loop(dataloader, model, loss_fn, optimizer, device, use_mask=True):
     train_loss /= num_batches
     print("Training performance: \n",
           f"Avg loss:{train_loss:>8f}\n")
-    return train_loss
+    pred_times = np.array(pred_times)
+    retval = (train_loss, pred_times) if return_pred_times else train_loss
+    return retval
 
 
-def val_loop(dataloader, model, loss_fn, device, use_mask=True):
+def val_loop(dataloader, model, loss_fn, device, use_mask=True,
+             return_pred_times=False):
     num_batches = len(dataloader)
     val_loss = 0
 
     # Inspect model signature.
     sig = signature(model.forward)
     use_mask = True if "feature_pad_mask" in sig.parameters and use_mask is True else False
+
+    # Collect prediction time.
+    pred_times = []
 
     # Switch to evaluation mode.
     model.eval()
@@ -103,14 +120,19 @@ def val_loop(dataloader, model, loss_fn, device, use_mask=True):
             token = batch_sample["token"]
             feature = feature.to(device)
             token = token.to(device)
+            frames = feature.shape[-2]
 
             # Predict.
+            pred_start = time.perf_counter()
             if use_mask:
                 feature_pad_mask = batch_sample["feature_pad_mask"]
                 feature_pad_mask = feature_pad_mask.to(device)
                 pred = model(feature, feature_pad_mask=feature_pad_mask)
             else:
                 pred = model(feature)
+            pred_end = time.perf_counter()
+            pred_times.append([frames, pred_end - pred_start])
+
             val_loss += loss_fn(pred, token.squeeze(-1)).item()
     print(f"Done. Time:{time.perf_counter()-start}")
 
@@ -118,16 +140,22 @@ def val_loop(dataloader, model, loss_fn, device, use_mask=True):
     val_loss /= num_batches
     print("Validation performance: \n",
           f"Avg loss:{val_loss:>8f}\n")
-    return val_loss
+    pred_times = np.array(pred_times)
+    retval = (val_loss, pred_times) if return_pred_times else val_loss
+    return retval
 
 
-def test_loop(dataloader, model, device, use_mask=False):
+def test_loop(dataloader, model, device, use_mask=False,
+              return_pred_times=False):
     size = len(dataloader.dataset)
     correct = 0
 
     # Inspect model signature.
     sig = signature(model.forward)
     use_mask = True if "feature_pad_mask" in sig.parameters and use_mask is True else False
+
+    # Collect prediction time.
+    pred_times = []
 
     # Switch to evaluation mode.
     model.eval()
@@ -140,14 +168,18 @@ def test_loop(dataloader, model, device, use_mask=False):
             token = batch_sample["token"]
             feature = feature.to(device)
             token = token.to(device)
+            frames = feature.shape[-2]
 
             # Predict.
+            pred_start = time.perf_counter()
             if use_mask:
                 feature_pad_mask = batch_sample["feature_pad_mask"]
                 feature_pad_mask = feature_pad_mask.to(device)
                 pred = model(feature, feature_pad_mask=feature_pad_mask)
             else:
                 pred = model(feature)
+            pred_end = time.perf_counter()
+            pred_times.append([frames, pred_end - pred_start])
 
             pred_ids = pred.argmax(dim=1).unsqueeze(-1)
             count = (pred_ids == token).sum().detach().cpu().numpy()
@@ -157,7 +189,9 @@ def test_loop(dataloader, model, device, use_mask=False):
     acc = correct / size * 100
     print("Test performance: \n",
           f"Accuracy:{acc:>0.1f}%")
-    return acc
+    pred_times = np.array(pred_times)
+    retval = (acc, pred_times) if return_pred_times else acc
+    return retval
 
 
 # --- Execution --------------------------------------------------------
