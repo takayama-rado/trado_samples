@@ -526,6 +526,9 @@ class PartsBasedTemporalInterpolation():
         # Too many failed.
         if tmask.sum() < self.accept_correct_ratio:
             return feature
+        # All failed.
+        if tmask.sum() == 0.0:
+            return feature
 
         x = np.arange(tlength)
         xs = np.where(tmask != 0)[0]
