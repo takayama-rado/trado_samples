@@ -25,7 +25,9 @@ import numpy as np
 import torch
 
 # Local modules
-
+from .activation import (
+    GELUAcc,
+    TanhExp)
 
 # Execution settings
 VERSION = u"%(prog)s dev"
@@ -82,9 +84,13 @@ def select_reluwise_activation(activation):
     elif activation == "gelu":
         layer = torch.nn.GELU()
     elif activation in ["swish", "silu"]:
-        layer = torch.nn.SILU()
+        layer = torch.nn.SiLU()
     elif activation == "mish":
         layer = torch.nn.Mish()
+    elif activation == "geluacc":
+        layer = GELUAcc()
+    elif activation == "tanhexp":
+        layer = TanhExp()
     else:
         raise NotImplementedError(f"Activation for {activation} is not implemented.")
     return layer
