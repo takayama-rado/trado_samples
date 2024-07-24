@@ -288,7 +288,7 @@ class DataLoaderSettings():
         test_dataset = HDF5Dataset(test_hdf5files,
             convert_to_channel_first=self.convert_to_channel_first,
             pre_transforms=pre_transforms,
-            transforms=train_transforms,
+            transforms=test_transforms,
             load_into_ram=self.load_into_ram)
 
         # Create dataloaders.
