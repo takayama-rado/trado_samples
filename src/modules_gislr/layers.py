@@ -484,6 +484,34 @@ class PositionwiseFeedForward(nn.Module):
         return feature
 
 
+def create_norm(norm_type, dim_model, eps=1e-5, add_bias=None):
+    # The argument `bias` was added at v2.1.0.
+    # So, we check whether LayerNorm has this.
+    sig = signature(nn.LayerNorm)
+    available_bias = bool("bias" in sig.parameters)
+    if norm_type == "layer":
+        if available_bias:
+            norm = nn.LayerNorm(dim_model, eps=eps, bias=add_bias)
+        else:
+            norm = nn.LayerNorm(dim_model, eps=eps)
+    elif norm_type == "batch":
+        norm = nn.BatchNorm1d(dim_model, eps=eps)
+    return norm
+
+
+def apply_norm(norm_layer, feature):
+    # `[N, T, C]`
+    if isinstance(norm_layer, nn.LayerNorm):
+        feature = norm_layer(feature)
+    elif isinstance(norm_layer, nn.BatchNorm1d):
+        # `[N, T, C] -> [N, C, T]`
+        feature = feature.permute([0, 2, 1])
+        feature = norm_layer(feature)
+        # `[N, C, T] -> [N, T, C]`
+        feature = feature.permute([0, 2, 1])
+    return feature
+
+
 class TransformerEncoderLayer(nn.Module):
     def __init__(self,
                  dim_model,
@@ -491,13 +519,18 @@ class TransformerEncoderLayer(nn.Module):
                  dim_ffw,
                  dropout,
                  activation,
-                 layer_norm_eps,
+                 norm_type_sattn,
+                 norm_type_ffw,
+                 norm_eps,
                  norm_first,
                  add_bias):
         super().__init__()
 
         self.norm_first = norm_first
 
+        #################################################
+        # MHA.
+        #################################################
         self.self_attn = MultiheadAttention(
             key_dim=dim_model,
             query_dim=dim_model,
@@ -506,25 +539,20 @@ class TransformerEncoderLayer(nn.Module):
             num_heads=num_heads,
             dropout=dropout,
             add_bias=add_bias)
+        self.norm_sattn = create_norm(norm_type_sattn, dim_model, norm_eps, add_bias)
 
+        #################################################
+        # PFFN.
+        #################################################
         self.ffw = PositionwiseFeedForward(
             dim_model=dim_model,
             dim_ffw=dim_ffw,
             dropout=dropout,
             activation=activation,
             add_bias=add_bias)
+        self.norm_ffw = create_norm(norm_type_ffw, dim_model, norm_eps, add_bias)
 
         self.dropout = nn.Dropout(p=dropout)
-
-        # The argument `bias` was added at v2.1.0.
-        # So, we check whether LayerNorm has this.
-        sig = signature(nn.LayerNorm)
-        if "bias" in sig.parameters:
-            self.norm1 = nn.LayerNorm(dim_model, eps=layer_norm_eps, bias=add_bias)
-            self.norm2 = nn.LayerNorm(dim_model, eps=layer_norm_eps, bias=add_bias)
-        else:
-            self.norm1 = nn.LayerNorm(dim_model, eps=layer_norm_eps)
-            self.norm2 = nn.LayerNorm(dim_model, eps=layer_norm_eps)
 
         # To store attention weights.
         self.attw = None
@@ -542,7 +570,7 @@ class TransformerEncoderLayer(nn.Module):
         #################################################
         # `[N, qlen, dim_model]`
         residual = feature
-        feature = self.norm1(feature)
+        feature = apply_norm(self.norm_sattn, feature)
         feature, self.attw = self.self_attn(
             key=feature,
             value=feature,
@@ -555,7 +583,7 @@ class TransformerEncoderLayer(nn.Module):
         #################################################
         residual = feature
         # `[N, qlen, dim_model]`
-        feature = self.norm2(feature)
+        feature = apply_norm(self.norm_ffw, feature)
         feature = self.ffw(feature)
         feature = self.dropout(feature) + residual
         return feature
@@ -577,7 +605,7 @@ class TransformerEncoderLayer(nn.Module):
             query=feature,
             mask=san_mask)
         feature = self.dropout(feature) + residual
-        feature = self.norm1(feature)
+        feature = apply_norm(self.norm_sattn, feature)
 
         #################################################
         # FFW
@@ -586,7 +614,7 @@ class TransformerEncoderLayer(nn.Module):
         # `[N, qlen, dim_model]`
         feature = self.ffw(feature)
         feature = self.dropout(feature) + residual
-        feature = self.norm2(feature)
+        feature = apply_norm(self.norm_ffw, feature)
         return feature
 
     def forward(self,
@@ -615,7 +643,8 @@ class TransformerEncoder(nn.Module):
                  num_layers,
                  dim_model,
                  dropout_pe,
-                 layer_norm_eps,
+                 norm_type_tail,
+                 norm_eps,
                  norm_first,
                  add_bias,
                  add_tailnorm):
@@ -629,15 +658,9 @@ class TransformerEncoder(nn.Module):
         # post-normalization structure includes tail-normalization in encoder
         # layers.
         if add_tailnorm and norm_first:
-            # The argument `bias` was added at v2.1.0.
-            # So, we check whether LayerNorm has this.
-            sig = signature(nn.LayerNorm)
-            if "bias" in sig.parameters:
-                self.norm = nn.LayerNorm(dim_model, eps=layer_norm_eps, bias=add_bias)
-            else:
-                self.norm = nn.LayerNorm(dim_model, eps=layer_norm_eps)
+            self.norm_tail = create_norm(norm_type_tail, dim_model, norm_eps, add_bias)
         else:
-            self.norm = Identity()
+            self.norm_tail = Identity()
 
     def forward(self,
                 feature,
@@ -648,7 +671,7 @@ class TransformerEncoder(nn.Module):
             feature = layer(feature,
                             causal_mask,
                             src_key_padding_mask)
-        feature = self.norm(feature)
+        feature = apply_norm(self.norm_tail, feature)
         return feature
 
 
@@ -664,7 +687,10 @@ class TransformerEnISLR(nn.Module):
                  tren_dim_ffw=256,
                  tren_dropout_pe=0.1,
                  tren_dropout=0.1,
-                 tren_layer_norm_eps=1e-5,
+                 tren_norm_type_sattn="layer",
+                 tren_norm_type_ffw="layer",
+                 tren_norm_type_tail="layer",
+                 tren_norm_eps=1e-5,
                  tren_norm_first=True,
                  tren_add_bias=True,
                  tren_add_tailnorm=True):
@@ -689,20 +715,23 @@ class TransformerEnISLR(nn.Module):
 
         # Transformer-Encoder.
         enlayer = TransformerEncoderLayer(
-                dim_model=inter_channels,
-                num_heads=tren_num_heads,
-                dim_ffw=tren_dim_ffw,
-                dropout=tren_dropout,
-                activation=activation,
-                layer_norm_eps=tren_layer_norm_eps,
-                norm_first=tren_norm_first,
-                add_bias=tren_add_bias)
+            dim_model=inter_channels,
+            num_heads=tren_num_heads,
+            dim_ffw=tren_dim_ffw,
+            dropout=tren_dropout,
+            activation=activation,
+            norm_type_sattn=tren_norm_type_sattn,
+            norm_type_ffw=tren_norm_type_ffw,
+            norm_eps=tren_norm_eps,
+            norm_first=tren_norm_first,
+            add_bias=tren_add_bias)
         self.tr_encoder = TransformerEncoder(
             encoder_layer=enlayer,
             num_layers=tren_num_layers,
             dim_model=inter_channels,
             dropout_pe=tren_dropout_pe,
-            layer_norm_eps=tren_layer_norm_eps,
+            norm_type_tail=tren_norm_type_tail,
+            norm_eps=tren_norm_eps,
             norm_first=tren_norm_first,
             add_bias=tren_add_bias,
             add_tailnorm=tren_add_tailnorm)
