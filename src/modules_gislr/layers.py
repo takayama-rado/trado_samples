@@ -499,16 +499,24 @@ def create_norm(norm_type, dim_model, eps=1e-5, add_bias=None):
     return norm
 
 
-def apply_norm(norm_layer, feature):
-    # `[N, T, C]`
+def apply_norm(norm_layer, feature, channel_first=False):
     if isinstance(norm_layer, nn.LayerNorm):
-        feature = norm_layer(feature)
+        if channel_first:
+            # `[N, C, T] -> [N, T, C] -> [N, C, T]`
+            feature = feature.permute([0, 2, 1]).contiguous()
+            feature = norm_layer(feature)
+            feature = feature.permute([0, 2, 1]).contiguous()
+        else:
+            feature = norm_layer(feature)
     elif isinstance(norm_layer, nn.BatchNorm1d):
-        # `[N, T, C] -> [N, C, T]`
-        feature = feature.permute([0, 2, 1])
-        feature = norm_layer(feature)
-        # `[N, C, T] -> [N, T, C]`
-        feature = feature.permute([0, 2, 1])
+        if channel_first:
+            feature = norm_layer(feature)
+        else:
+            # `[N, T, C] -> [N, C, T]`
+            feature = feature.permute([0, 2, 1]).contiguous()
+            feature = norm_layer(feature)
+            # `[N, C, T] -> [N, T, C]`
+            feature = feature.permute([0, 2, 1]).contiguous()
     return feature
 
 
@@ -1049,17 +1057,18 @@ class ConformerConvBlock(nn.Module):
 
     def forward(self,
                 feature):
-        # `[N, T, C] -> [N, C, T] -> [N, 2C, T]`
+        # `[N, T, C] -> [N, C, T] -> [N, 2C, T] -> [N, C, T]`
         feature = feature.permute([0, 2, 1]).contiguous()
         feature = self.pointwise_conv1(feature)
         feature = F.glu(feature, dim=1)
 
-        # `[N, 2C, T] -> [N, C, T]`
+        # `[N, C, T] -> [N, C, T]`
         feature = self.depthwise_conv(feature)
         if self.causal:
             feature = feature[:, :, :-self.padding]
 
-        feature = apply_norm(self.norm, feature)
+        # `[N, C, T]`: channel_first
+        feature = apply_norm(self.norm, feature, channel_first=True)
 
         feature = self.activation(feature)
         feature = self.pointwise_conv2(feature)
