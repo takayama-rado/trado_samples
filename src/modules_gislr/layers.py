@@ -789,7 +789,7 @@ class TransformerEnISLR(nn.Module):
         return logit
 
 
-class MacarronNetEncoderLayer(nn.Module):
+class MacaronNetEncoderLayer(nn.Module):
     def __init__(self,
                  dim_model,
                  num_heads,
@@ -799,10 +799,12 @@ class MacarronNetEncoderLayer(nn.Module):
                  norm_type_sattn,
                  norm_type_ffw,
                  norm_eps,
-                 add_bias):
+                 add_bias,
+                 fc_factor=0.5,
+                 shared_ffw=False):
         super().__init__()
 
-        self.fc_factor = 0.5
+        self.fc_factor = fc_factor
 
         # =====================================================================
         # First half PFFN.
@@ -830,12 +832,15 @@ class MacarronNetEncoderLayer(nn.Module):
         # Second half PFFN.
         # =====================================================================
         self.norm_ffw2 = create_norm(norm_type_ffw, dim_model, norm_eps, add_bias)
-        self.ffw2 = PositionwiseFeedForward(
-            dim_model=dim_model,
-            dim_ffw=dim_ffw,
-            dropout=dropout,
-            activation=activation,
-            add_bias=add_bias)
+        if shared_ffw:
+            self.ffw2 = self.ffw1
+        else:
+            self.ffw2 = PositionwiseFeedForward(
+                dim_model=dim_model,
+                dim_ffw=dim_ffw,
+                dropout=dropout,
+                activation=activation,
+                add_bias=add_bias)
 
         self.dropout = nn.Dropout(p=dropout)
 
@@ -888,7 +893,7 @@ class MacarronNetEncoderLayer(nn.Module):
         return feature
 
 
-class MacarronNetEnISLR(nn.Module):
+class MacaronNetEnISLR(nn.Module):
     def __init__(self,
                  in_channels,
                  inter_channels,
@@ -905,7 +910,9 @@ class MacarronNetEnISLR(nn.Module):
                  tren_norm_type_tail="layer",
                  tren_norm_eps=1e-5,
                  tren_add_bias=True,
-                 tren_add_tailnorm=True):
+                 tren_add_tailnorm=True,
+                 fc_factor=0.5,
+                 shared_ffw=False):
         super().__init__()
 
         # Feature extraction.
@@ -926,7 +933,7 @@ class MacarronNetEnISLR(nn.Module):
                 padding=0)
 
         # Transformer-Encoder.
-        enlayer = MacarronNetEncoderLayer(
+        enlayer = MacaronNetEncoderLayer(
             dim_model=inter_channels,
             num_heads=tren_num_heads,
             dim_ffw=tren_dim_ffw,
@@ -935,7 +942,9 @@ class MacarronNetEnISLR(nn.Module):
             norm_type_sattn=tren_norm_type_sattn,
             norm_type_ffw=tren_norm_type_ffw,
             norm_eps=tren_norm_eps,
-            add_bias=tren_add_bias)
+            add_bias=tren_add_bias,
+            fc_factor=fc_factor,
+            shared_ffw=shared_ffw)
         self.tr_encoder = TransformerEncoder(
             encoder_layer=enlayer,
             num_layers=tren_num_layers,
@@ -943,7 +952,7 @@ class MacarronNetEnISLR(nn.Module):
             dropout_pe=tren_dropout_pe,
             norm_type_tail=tren_norm_type_tail,
             norm_eps=tren_norm_eps,
-            norm_first=True,  # Fixed for MacarronNet.
+            norm_first=True,  # Fixed for MacaronNet.
             add_bias=tren_add_bias,
             add_tailnorm=tren_add_tailnorm)
 
@@ -1321,7 +1330,7 @@ class ConformerEnISLR(nn.Module):
             dropout_pe=tren_dropout_pe,
             norm_type_tail=tren_norm_type_tail,
             norm_eps=tren_norm_eps,
-            norm_first=True,  # Fixed for MacarronNet.
+            norm_first=True,  # Fixed for MacaronNet.
             add_bias=tren_add_bias,
             add_tailnorm=tren_add_tailnorm)
 
