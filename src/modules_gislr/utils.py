@@ -113,9 +113,9 @@ def save_checkpoint(ckpt_path, model,
         "cuda_random_all": torch.cuda.get_rng_state_all(),
     }
     if optimizer is not None:
-        checkpoint["optimizer"] = optimizer
+        checkpoint["optimizer"] = optimizer.state_dict()
     if scheduler is not None:
-        checkpoint["scheduler"] = scheduler
+        checkpoint["scheduler"] = scheduler.state_dict()
 
     torch.save(checkpoint, ckpt_path)
 
@@ -129,8 +129,7 @@ def load_checkpoint(ckpt_path, model,
         model.module.load_state_dict(checkpoint["model"])
     else:
         model.load_state_dict(checkpoint["model"])
-    # epoch = checkpoint["epoch"]
-    epoch = 50
+    epoch = checkpoint["epoch"]
     random.setstate(checkpoint["random"])
     np.random.set_state(checkpoint["np_random"])
     torch.set_rng_state(checkpoint["torch"])
