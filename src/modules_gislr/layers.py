@@ -388,6 +388,9 @@ class MultiheadAttention(nn.Module):
 
         self.neg_inf = None
 
+        self.qkv_same_dim = self.key_dim == self.query_dim
+        self.reset_parameters(add_bias)
+
     def reset_parameters(self, add_bias):
         """Initialize parameters with Xavier uniform distribution.
 
@@ -395,9 +398,14 @@ class MultiheadAttention(nn.Module):
         https://github.com/pytorch/fairseq/blob/master/fairseq/modules/multihead_attention.py  # pylint: disable=line-too-long
 
         """
-        nn.init.xavier_uniform_(self.w_key.weight, gain=1 / math.sqrt(2))
-        nn.init.xavier_uniform_(self.w_value.weight, gain=1 / math.sqrt(2))
-        nn.init.xavier_uniform_(self.w_query.weight, gain=1 / math.sqrt(2))
+        if self.qkv_same_dim:
+            nn.init.xavier_uniform_(self.w_key.weight, gain=1 / math.sqrt(2))
+            nn.init.xavier_uniform_(self.w_value.weight, gain=1 / math.sqrt(2))
+            nn.init.xavier_uniform_(self.w_query.weight, gain=1 / math.sqrt(2))
+        else:
+            nn.init.xavier_uniform_(self.w_key.weight)
+            nn.init.xavier_uniform_(self.w_value.weight)
+            nn.init.xavier_uniform_(self.w_query.weight)
         nn.init.xavier_uniform_(self.w_out.weight)
         if add_bias:
             nn.init.constant_(self.w_key.bias, 0.)
