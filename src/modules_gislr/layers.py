@@ -1058,20 +1058,6 @@ class ConformerConvBlock(nn.Module):
             stride=1,
             padding=0)
 
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        for conv_layer in [self.pointwise_conv1,
-                           self.pointwise_conv2,
-                           self.depthwise_conv]:
-            for name, param in conv_layer.named_parameters():
-                if param.dim() == 1:
-                    nn.init.constant_(param, 0.)  # bias.
-                elif param.dim() in [2, 3, 4]:
-                    nn.init.xavier_uniform_(param)  # linear layer
-                else:
-                    raise ValueError(name)
-
     def forward(self,
                 feature):
         # `[N, T, C] -> [N, C, T] -> [N, 2C, T] -> [N, C, T]`
