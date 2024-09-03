@@ -16,6 +16,7 @@ from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 
+import collections
 import copy
 import math
 from inspect import signature
@@ -1013,12 +1014,15 @@ class ConformerConvBlock(nn.Module):
     def __init__(self,
                  dim_model,
                  kernel_size,
+                 conv_type="separable",
                  norm_type="layer",
                  activation="swish",
                  padding_mode="zeros",
+                 add_tail_conv=True,
                  causal=False):
         super().__init__()
 
+        assert conv_type in ["separable", "standard", "predepth"]
         assert norm_type in ["layer", "batch"]
         assert (kernel_size - 1) % 2 == 0, f"kernel_size:{kernel_size} must be the odd number."
         assert kernel_size >= 3, f"kernel_size: {kernel_size} must be larger than 3."
@@ -1031,42 +1035,92 @@ class ConformerConvBlock(nn.Module):
         else:
             self.padding = (kernel_size - 1) // 2
 
-        self.pointwise_conv1 = nn.Conv1d(
-            in_channels=dim_model,
-            out_channels=dim_model * 2,  # for GLU
-            kernel_size=1,
-            stride=1,
-            padding=0)
-        self.depthwise_conv = nn.Conv1d(
-            in_channels=dim_model,
-            out_channels=dim_model,
-            kernel_size=kernel_size,
-            stride=1,
-            padding=self.padding,
-            groups=dim_model,  # Depthwise
-            padding_mode=padding_mode,
-            bias=True)
+        if conv_type == "separable":
+            self.conv_module = nn.Sequential(
+                collections.OrderedDict([
+                    # Point-wise.
+                    ("pconv",
+                     nn.Conv1d(
+                        in_channels=dim_model,
+                        out_channels=dim_model * 2,  # for GLU
+                        kernel_size=1,
+                        stride=1,
+                        padding=0,
+                        bias=True)),
+                    ("glu", nn.GLU(dim=1)),
+                    # Depth-wise
+                    ("dconv",
+                     nn.Conv1d(
+                        in_channels=dim_model,
+                        out_channels=dim_model,
+                        kernel_size=kernel_size,
+                        stride=1,
+                        padding=self.padding,
+                        groups=dim_model,
+                        padding_mode=padding_mode,
+                        bias=True))])
+                )
+        elif conv_type == "predepth":
+            self.conv_module = nn.Sequential(
+                collections.OrderedDict([
+                    # Depth-wise
+                    ("dconv",
+                     nn.Conv1d(
+                        in_channels=dim_model,
+                        out_channels=dim_model,
+                        kernel_size=kernel_size,
+                        stride=1,
+                        padding=self.padding,
+                        groups=dim_model,
+                        padding_mode=padding_mode,
+                        bias=True)),
+                    # Point-wise.
+                    ("pconv",
+                     nn.Conv1d(
+                        in_channels=dim_model,
+                        out_channels=dim_model * 2,  # for GLU
+                        kernel_size=1,
+                        stride=1,
+                        padding=0,
+                        bias=True)),
+                    ("glu", nn.GLU(dim=1))])
+                )
+        elif conv_type == "standard":
+            self.conv_module = nn.Sequential(
+                collections.OrderedDict([
+                    ("conv",
+                     nn.Conv1d(
+                         in_channels=dim_model,
+                         out_channels=dim_model * 2,  # for GLU
+                         kernel_size=kernel_size,
+                         stride=1,
+                         padding=self.padding,
+                         bias=True)),
+                    ("glu", nn.GLU(dim=1))])
+                )
 
         self.norm = create_norm(norm_type, dim_model)
 
         self.activation = select_reluwise_activation(activation)
 
-        self.pointwise_conv2 = nn.Conv1d(
-            in_channels=dim_model,
-            out_channels=dim_model,
-            kernel_size=1,
-            stride=1,
-            padding=0)
+        if add_tail_conv:
+            self.tail_pointwise_conv = nn.Conv1d(
+                in_channels=dim_model,
+                out_channels=dim_model,
+                kernel_size=1,
+                stride=1,
+                padding=0)
+        else:
+            self.tail_pointwise_conv = nn.Identity()
+
+        self.add_tail_conv = add_tail_conv
 
     def forward(self,
                 feature):
-        # `[N, T, C] -> [N, C, T] -> [N, 2C, T] -> [N, C, T]`
+        # `[N, T, C] -> [N, C, T]`
         feature = feature.permute([0, 2, 1]).contiguous()
-        feature = self.pointwise_conv1(feature)
-        feature = F.glu(feature, dim=1)
+        feature = self.conv_module(feature)
 
-        # `[N, C, T] -> [N, C, T]`
-        feature = self.depthwise_conv(feature)
         if self.causal:
             feature = feature[:, :, :-self.padding]
 
@@ -1074,7 +1128,7 @@ class ConformerConvBlock(nn.Module):
         feature = apply_norm(self.norm, feature, channel_first=True)
 
         feature = self.activation(feature)
-        feature = self.pointwise_conv2(feature)
+        feature = self.tail_pointwise_conv(feature)
 
         # `[N, C, T] -> [N, T, C]`
         feature = feature.permute([0, 2, 1]).contiguous()
@@ -1093,9 +1147,11 @@ class ConformerEncoderLayer(nn.Module):
                  norm_eps,
                  add_bias,
                  conv_kernel_size=3,
-                 conv_activation="swish",
+                 conv_type="separable",
                  conv_norm_type="layer",
+                 conv_activation="swish",
                  conv_padding_mode="zeros",
+                 conv_add_tail_conv=True,
                  conv_causal=False,
                  conv_layout="post"):
         super().__init__()
@@ -1133,9 +1189,11 @@ class ConformerEncoderLayer(nn.Module):
         self.conv = ConformerConvBlock(
             dim_model=dim_model,
             kernel_size=conv_kernel_size,
-            activation=conv_activation,
+            conv_type=conv_type,
             norm_type=conv_norm_type,
+            activation=conv_activation,
             padding_mode=conv_padding_mode,
+            add_tail_conv=conv_add_tail_conv,
             causal=conv_causal)
 
         # =====================================================================
@@ -1276,9 +1334,11 @@ class ConformerEnISLR(nn.Module):
                  tren_add_bias=True,
                  tren_add_tailnorm=True,
                  conv_kernel_size=3,
-                 conv_activation="swish",
+                 conv_type="separable",
                  conv_norm_type="layer",
+                 conv_activation="swish",
                  conv_padding_mode="zeros",
+                 conv_add_tail_conv=True,
                  conv_causal=False,
                  conv_layout="post"):
         super().__init__()
@@ -1312,10 +1372,12 @@ class ConformerEnISLR(nn.Module):
             norm_eps=tren_norm_eps,
             add_bias=tren_add_bias,
             conv_kernel_size=conv_kernel_size,
+            conv_type=conv_type,
             conv_activation=conv_activation,
             conv_norm_type=conv_norm_type,
             conv_padding_mode=conv_padding_mode,
             conv_causal=conv_causal,
+            conv_add_tail_conv=conv_add_tail_conv,
             conv_layout=conv_layout)
         self.tr_encoder = TransformerEncoder(
             encoder_layer=enlayer,
