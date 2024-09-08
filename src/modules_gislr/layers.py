@@ -1303,6 +1303,419 @@ class TransformerEnISLR(nn.Module):
         return logit
 
 
+class TransformerDecoderLayer(nn.Module):
+    def __init__(self,
+                 dim_model,
+                 num_heads,
+                 dim_ffw,
+                 dropout,
+                 activation,
+                 norm_type_sattn,
+                 norm_type_cattn,
+                 norm_type_ffw,
+                 norm_eps,
+                 norm_first,
+                 add_bias):
+        super().__init__()
+
+        self.norm_first = norm_first
+
+        #################################################
+        # MHSA.
+        #################################################
+        self.self_attn = MultiheadAttention(
+            key_dim=dim_model,
+            query_dim=dim_model,
+            att_dim=dim_model,
+            out_dim=dim_model,
+            num_heads=num_heads,
+            dropout=dropout,
+            add_bias=add_bias)
+        self.norm_sattn = create_norm(norm_type_sattn, dim_model, norm_eps, add_bias)
+
+        #################################################
+        # MHCA.
+        #################################################
+        self.cross_attn = MultiheadAttention(
+            key_dim=dim_model,
+            query_dim=dim_model,
+            att_dim=dim_model,
+            out_dim=dim_model,
+            num_heads=num_heads,
+            dropout=dropout,
+            add_bias=add_bias)
+        self.norm_cattn = create_norm(norm_type_cattn, dim_model, norm_eps, add_bias)
+
+        #################################################
+        # PFFN.
+        #################################################
+        self.ffw = PositionwiseFeedForward(
+            dim_model=dim_model,
+            dim_ffw=dim_ffw,
+            dropout=dropout,
+            activation=activation,
+            add_bias=add_bias)
+        self.norm_ffw = create_norm(norm_type_ffw, dim_model, norm_eps, add_bias)
+
+        self.dropout = nn.Dropout(p=dropout)
+
+        # To store attention weights.
+        self.sattw = None
+        self.cattw = None
+
+    def _forward_prenorm(self,
+                         tgt_feature,
+                         enc_feature,
+                         tgt_san_mask,
+                         enc_tgt_mask):
+        """Pre-normalization structure.
+
+        For the details, please refer
+        https://arxiv.org/pdf/2002.04745v1.pdf
+        """
+        #################################################
+        # self-attention
+        #################################################
+        residual = tgt_feature
+        tgt_feature = apply_norm(self.norm_sattn, tgt_feature)
+        tgt_feature, self.sattw = self.self_attn(
+            key=tgt_feature,
+            value=tgt_feature,
+            query=tgt_feature,
+            mask=tgt_san_mask)
+        tgt_feature = self.dropout(tgt_feature) + residual
+
+        #################################################
+        # cross-attention
+        #################################################
+        residual = tgt_feature
+        tgt_feature = apply_norm(self.norm_cattn, tgt_feature)
+        tgt_feature, self.cattw = self.cross_attn(
+            key=enc_feature,
+            value=enc_feature,
+            query=tgt_feature,
+            mask=enc_tgt_mask)
+        tgt_feature = self.dropout(tgt_feature) + residual
+
+        #################################################
+        # FFW
+        #################################################
+        residual = tgt_feature
+        tgt_feature = apply_norm(self.norm_ffw, tgt_feature)
+        tgt_feature = self.ffw(tgt_feature)
+        tgt_feature = self.dropout(tgt_feature) + residual
+        return tgt_feature
+
+    def _forward_postnorm(self,
+                          tgt_feature,
+                          enc_feature,
+                          tgt_san_mask,
+                          enc_tgt_mask):
+        """Post-normalization structure (standard).
+
+        """
+        #################################################
+        # self-attention
+        #################################################
+        residual = tgt_feature
+        tgt_feature, self.sattw = self.self_attn(
+            key=tgt_feature,
+            value=tgt_feature,
+            query=tgt_feature,
+            mask=tgt_san_mask)
+        tgt_feature = self.dropout(tgt_feature) + residual
+        tgt_feature = apply_norm(self.norm_sattn, tgt_feature)
+
+        #################################################
+        # cross-attention
+        #################################################
+        residual = tgt_feature
+        tgt_feature, self.cattw = self.cross_attn(
+            key=enc_feature,
+            value=enc_feature,
+            query=tgt_feature,
+            mask=enc_tgt_mask)
+        tgt_feature = self.dropout(tgt_feature) + residual
+        tgt_feature = apply_norm(self.norm_cattn, tgt_feature)
+
+        #################################################
+        # FFW
+        #################################################
+        residual = tgt_feature
+        tgt_feature = self.ffw(tgt_feature)
+        tgt_feature = self.dropout(tgt_feature) + residual
+        tgt_feature = apply_norm(self.norm_ffw, tgt_feature)
+
+        return tgt_feature
+
+    def forward(self,
+                tgt_feature,
+                enc_feature,
+                tgt_causal_mask=None,
+                enc_tgt_causal_mask=None,
+                tgt_key_padding_mask=None,
+                enc_key_padding_mask=None):
+
+        # Create mask.
+        if tgt_key_padding_mask is None:
+            tgt_key_padding_mask = torch.ones(tgt_feature.shape[:2],
+                                              dtype=enc_feature.dtype,
+                                              device=enc_feature.device)
+        tgt_san_mask = make_san_mask(tgt_key_padding_mask, tgt_causal_mask)
+        if enc_key_padding_mask is None:
+            enc_key_padding_mask = torch.ones(enc_feature.shape[:2],
+                                              dtype=enc_feature.dtype,
+                                              device=enc_feature.device)
+        enc_tgt_mask = enc_key_padding_mask.unsqueeze(1).repeat(
+            [1, tgt_feature.shape[1], 1])
+        if enc_tgt_causal_mask is not None:
+            enc_tgt_mask = enc_tgt_mask & enc_tgt_causal_mask
+
+        if self.norm_first:
+            tgt_feature = self._forward_prenorm(tgt_feature, enc_feature,
+                                                tgt_san_mask, enc_tgt_mask)
+        else:
+            tgt_feature = self._forward_postnorm(tgt_feature, enc_feature,
+                                                 tgt_san_mask, enc_tgt_mask)
+
+        return tgt_feature
+
+
+class TransformerDecoder(nn.Module):
+    def __init__(self,
+                 decoder_layer,
+                 out_channels,
+                 num_layers,
+                 dim_model,
+                 dropout_pe,
+                 norm_type_tail,
+                 norm_eps,
+                 norm_first,
+                 add_bias,
+                 add_tailnorm,
+                 padding_val):
+        super().__init__()
+
+        self.emb_layer = nn.Embedding(out_channels,
+                                      dim_model,
+                                      padding_idx=padding_val)
+        self.vocab_size = out_channels
+
+        self.pos_encoder = PositionalEncoding(dim_model, dropout_pe)
+        self.layers = nn.ModuleList([copy.deepcopy(decoder_layer) for _ in range(num_layers)])
+
+        # Add LayerNorm at tail position.
+        # This is applied only when norm_first is True because
+        # post-normalization structure includes tail-normalization in encoder
+        # layers.
+        if add_tailnorm and norm_first:
+            self.norm_tail = create_norm(norm_type_tail, dim_model, norm_eps, add_bias)
+        else:
+            self.norm_tail = Identity()
+
+        self.head = nn.Linear(dim_model, out_channels)
+
+    def forward(self,
+                tgt_feature,
+                enc_feature,
+                tgt_causal_mask,
+                enc_tgt_causal_mask,
+                tgt_key_padding_mask,
+                enc_key_padding_mask):
+
+        tgt_feature = self.emb_layer(tgt_feature) * math.sqrt(self.vocab_size)
+
+        tgt_feature = self.pos_encoder(tgt_feature)
+        for layer in self.layers:
+            tgt_feature = layer(
+                tgt_feature=tgt_feature,
+                enc_feature=enc_feature,
+                tgt_causal_mask=tgt_causal_mask,
+                enc_tgt_causal_mask=enc_tgt_causal_mask,
+                tgt_key_padding_mask=tgt_key_padding_mask,
+                enc_key_padding_mask=enc_key_padding_mask)
+        tgt_feature = apply_norm(self.norm_tail, tgt_feature)
+
+        logit = self.head(tgt_feature)
+        return logit
+
+
+class TransformerCSLR(nn.Module):
+    def __init__(self,
+                 in_channels,
+                 inter_channels,
+                 out_channels,
+                 padding_val,
+                 activation="relu",
+                 tren_num_layers=1,
+                 tren_num_heads=1,
+                 tren_dim_ffw=256,
+                 tren_dropout_pe=0.1,
+                 tren_dropout=0.1,
+                 tren_norm_type_sattn="layer",
+                 tren_norm_type_ffw="layer",
+                 tren_norm_type_tail="layer",
+                 tren_norm_eps=1e-5,
+                 tren_norm_first=True,
+                 tren_add_bias=True,
+                 tren_add_tailnorm=True,
+                 trde_num_layers=1,
+                 trde_num_heads=1,
+                 trde_dim_ffw=256,
+                 trde_dropout_pe=0.1,
+                 trde_dropout=0.1,
+                 trde_norm_type_sattn="layer",
+                 trde_norm_type_cattn="layer",
+                 trde_norm_type_ffw="layer",
+                 trde_norm_type_tail="layer",
+                 trde_norm_eps=1e-5,
+                 trde_norm_first=True,
+                 trde_add_bias=True,
+                 trde_add_tailnorm=True):
+        super().__init__()
+
+        # Feature extraction.
+        self.linear = nn.Linear(in_channels, inter_channels)
+        self.activation = select_reluwise_activation(activation)
+
+        # Transformer-Encoder.
+        enlayer = TransformerEncoderLayer(
+            dim_model=inter_channels,
+            num_heads=tren_num_heads,
+            dim_ffw=tren_dim_ffw,
+            dropout=tren_dropout,
+            activation=activation,
+            norm_type_sattn=tren_norm_type_sattn,
+            norm_type_ffw=tren_norm_type_ffw,
+            norm_eps=tren_norm_eps,
+            norm_first=tren_norm_first,
+            add_bias=tren_add_bias)
+        self.tr_encoder = TransformerEncoder(
+            encoder_layer=enlayer,
+            num_layers=tren_num_layers,
+            dim_model=inter_channels,
+            dropout_pe=tren_dropout_pe,
+            norm_type_tail=tren_norm_type_tail,
+            norm_eps=tren_norm_eps,
+            norm_first=tren_norm_first,
+            add_bias=tren_add_bias,
+            add_tailnorm=tren_add_tailnorm)
+
+        # Transformer-Decoder.
+        delayer = TransformerDecoderLayer(
+            dim_model=inter_channels,
+            num_heads=trde_num_heads,
+            dim_ffw=trde_dim_ffw,
+            dropout=trde_dropout,
+            activation=activation,
+            norm_type_sattn=trde_norm_type_sattn,
+            norm_type_cattn=trde_norm_type_cattn,
+            norm_type_ffw=trde_norm_type_ffw,
+            norm_eps=trde_norm_eps,
+            norm_first=trde_norm_first,
+            add_bias=trde_add_bias)
+        self.tr_decoder = TransformerDecoder(
+            decoder_layer=delayer,
+            out_channels=out_channels,
+            num_layers=trde_num_layers,
+            dim_model=inter_channels,
+            dropout_pe=trde_dropout_pe,
+            norm_type_tail=trde_norm_type_tail,
+            norm_eps=trde_norm_eps,
+            norm_first=trde_norm_first,
+            add_bias=trde_add_bias,
+            add_tailnorm=trde_add_tailnorm,
+            padding_val=padding_val)
+
+    def forward(self,
+                src_feature,
+                tgt_feature,
+                src_causal_mask,
+                src_padding_mask,
+                tgt_causal_mask,
+                tgt_padding_mask):
+        """Forward computation for train.
+        """
+        # Feature extraction.
+        # `[N, C, T, J] -> [N, T, C, J] -> [N, T, C*J] -> [N, T, C']`
+        N, C, T, J = src_feature.shape
+        src_feature = src_feature.permute([0, 2, 1, 3])
+        src_feature = src_feature.reshape(N, T, -1)
+
+        src_feature = self.linear(src_feature)
+
+        enc_feature = self.tr_encoder(
+            feature=src_feature,
+            causal_mask=src_causal_mask,
+            src_key_padding_mask=src_padding_mask)
+
+        preds = self.tr_decoder(tgt_feature=tgt_feature,
+                                enc_feature=enc_feature,
+                                tgt_causal_mask=tgt_causal_mask,
+                                enc_tgt_causal_mask=None,
+                                tgt_key_padding_mask=tgt_padding_mask,
+                                enc_key_padding_mask=src_padding_mask)
+        # `[N, T, C]`
+        return preds
+
+    def inference(self,
+                  src_feature,
+                  start_id,
+                  end_id,
+                  src_padding_mask=None,
+                  max_seqlen=10):
+        """Forward computation for test.
+        """
+
+        # Feature extraction.
+        # `[N, C, T, J] -> [N, T, C, J] -> [N, T, C*J] -> [N, T, C']`
+        N, C, T, J = src_feature.shape
+        src_feature = src_feature.permute([0, 2, 1, 3])
+        src_feature = src_feature.reshape(N, T, -1)
+
+        src_feature = self.linear(src_feature)
+
+        enc_feature = self.tr_encoder(
+            feature=src_feature,
+            causal_mask=None,
+            src_key_padding_mask=src_padding_mask)
+
+        # Apply decoder.
+        dec_inputs = torch.tensor([start_id]).to(src_feature.device)
+        # `[N, T]`
+        dec_inputs = dec_inputs.reshape([1, 1])
+        preds = None
+        pred_ids = [start_id]
+        for _ in range(max_seqlen):
+            pred = self.tr_decoder(
+                tgt_feature=dec_inputs,
+                enc_feature=enc_feature,
+                tgt_causal_mask=None,
+                enc_tgt_causal_mask=None,
+                tgt_key_padding_mask=None,
+                enc_key_padding_mask=src_padding_mask)
+            # Extract last prediction.
+            pred = pred[:, -1:, :]
+            # `[N, T, C]`
+            if preds is None:
+                preds = pred
+            else:
+                # Concatenate last elements.
+                preds = torch.cat([preds, pred], dim=1)
+
+            pid = torch.argmax(pred, dim=-1)
+            dec_inputs = torch.cat([dec_inputs, pid], dim=-1)
+
+            pid = pid.reshape([1]).detach().cpu().numpy()
+            pred_ids.append(int(pid))
+            if int(pid) == end_id:
+                break
+
+        # `[N, T]`
+        pred_ids = np.array([pred_ids])
+        return pred_ids, preds
+
+
 class MacaronNetEncoderLayer(nn.Module):
     def __init__(self,
                  dim_model,
