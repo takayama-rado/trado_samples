@@ -144,6 +144,20 @@ def load_checkpoint(ckpt_path, model,
     return model, epoch, optimizer, scheduler
 
 
+def plot_pred_times(outpath, train_times, val_times, test_times):
+    _train_times = train_times[:, 1]
+    _val_times = val_times[:, 1]
+    _test_times = test_times[:, 1]
+
+    plt.grid(axis="y", linestyle="dotted", color="k")
+
+    points = [_train_times, _val_times, _test_times]
+    plt.boxplot(points, labels=["Train", "Validation", "Test"])
+    plt.ylabel("Prediction time[sec]")
+    plt.xlabel("Process type")
+    plt.savefig(outpath, bbox_inches="tight")
+
+
 # --- Execution --------------------------------------------------------
 if __name__ == "__main__":
     print(__doc__)
