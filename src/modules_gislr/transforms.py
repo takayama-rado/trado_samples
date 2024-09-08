@@ -1149,6 +1149,51 @@ class SelectiveResize():
         return data
 
 
+class InsertTokensForS2S():
+    def __init__(self,
+                 sos_token,
+                 eos_token,
+                 error_at_exist=False):
+        self.sos_token = sos_token
+        self.eos_token = eos_token
+        self.error_at_exist = error_at_exist
+
+    def check_format(self, tokens):
+        insert_sos = False
+        if tokens[0] != self.sos_token:
+            insert_sos = True
+        elif self.error_at_exist:
+            message = f"The sos_token:{self.sos_token} is exist in {tokens}." \
+                + "Please check the format."
+            raise ValueError(message)
+        insert_eos = False
+        if tokens[-1] != self.eos_token:
+            insert_eos = True
+        elif self.error_at_exist:
+            message = f"The eos_token:{self.eos_token} is exist in {tokens}." \
+                + "Please check the format."
+            raise ValueError(message)
+        return insert_sos, insert_eos
+
+    def __call__(self,
+                 data: Dict[str, Any]) -> Dict[str, Any]:
+
+        tokens = data["token"]
+        dtype = tokens.dtype
+
+        insert_sos, insert_eos = self.check_format(tokens)
+        # Insert.
+        new_tokens = []
+        if insert_sos:
+            new_tokens.append(self.sos_token)
+        new_tokens += tokens.tolist()
+        if insert_eos:
+            new_tokens.append(self.eos_token)
+        new_tokens = np.array(new_tokens, dtype=dtype)
+        data["token"] = new_tokens
+        return data
+
+
 Mappings = {
     "replace_nan": ReplaceNan,
     "select_landmarks_and_feature": SelectLandmarksAndFeature,
@@ -1173,7 +1218,8 @@ Mappings = {
     "random_drop_joints": RandomDropJoints,
     "random_drop_spatial": RandomDropSpatial,
     "random_drop_temporal": RandomDropTemporal,
-    "selective_resize": SelectiveResize}
+    "selective_resize": SelectiveResize,
+    "insert_tokens_cslr": InsertTokensForS2S}
 
 
 def get_transform(name, kwargs):
