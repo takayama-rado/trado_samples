@@ -216,6 +216,115 @@ def merge_padded_batch(batch,
     return retval
 
 
+def load_dataset_files(files, include_swap, val_pid, test_pid):
+    hdf5_files = [fin for fin in files if ".json" not in fin.name]
+    if not include_swap:
+        hdf5_files = [fin for fin in hdf5_files if "_swap" not in fin.name]
+
+    train_hdf5files = [fin for fin in hdf5_files if str(val_pid) + ".hdf5" not in fin.name]
+    train_hdf5files = [fin for fin in train_hdf5files if str(test_pid) + ".hdf5" not in fin.name]
+    val_hdf5files = [fin for fin in hdf5_files if str(val_pid) + ".hdf5" in fin.name]
+    test_hdf5files = [fin for fin in hdf5_files if str(test_pid) + ".hdf5" in fin.name]
+    return train_hdf5files, val_hdf5files, test_hdf5files
+
+
+def load_dictionary(files, task_type):
+    dictionary = [fin for fin in files if ".json" in fin.name][0]
+    # Load dictionary.
+    with open(dictionary, "r") as fread:
+        key2token = json.load(fread)
+        token2key = {value: key for key, value in key2token.items()}
+    vocaburary = len(key2token)
+    if task_type == "cslr_s2s":
+        key2token["<sos>"] = vocaburary
+        key2token["<eos>"] = vocaburary + 1
+        key2token["<pad>"] = vocaburary + 2
+        token2key[vocaburary] = "<sos>"
+        token2key[vocaburary + 1] = "<eos>"
+        token2key[vocaburary + 2] = "<pad>"
+    elif task_type == "cslr_ctc":
+        key2token["<pad>"] = vocaburary
+        token2key[vocaburary] = "<pad>"
+    # Reset.
+    vocaburary = len(key2token)
+    return key2token, token2key, vocaburary
+
+
+def load_transforms(pre_transforms_settings,
+                    train_transforms_settings,
+                    val_transforms_settings,
+                    test_transforms_settings):
+    # Load transforms.
+    pre_transforms = []
+    for name, kwargs in pre_transforms_settings.items():
+        pre_transforms.append(get_transform(name, kwargs))
+    pre_transforms = Compose(pre_transforms)
+
+    train_transforms = []
+    for name, kwargs in train_transforms_settings.items():
+        train_transforms.append(get_transform(name, kwargs))
+    train_transforms = Compose(train_transforms)
+
+    val_transforms = []
+    for name, kwargs in val_transforms_settings.items():
+        val_transforms.append(get_transform(name, kwargs))
+    val_transforms = Compose(val_transforms)
+
+    test_transforms = []
+    for name, kwargs in test_transforms_settings.items():
+        test_transforms.append(get_transform(name, kwargs))
+    test_transforms = Compose(test_transforms)
+    return pre_transforms, train_transforms, val_transforms, test_transforms
+
+
+def create_dataset(train_hdf5files,
+                   val_hdf5files,
+                   test_hdf5files,
+                   pre_transforms,
+                   train_transforms,
+                   val_transforms,
+                   test_transforms,
+                   convert_to_channel_first,
+                   load_into_ram):
+    # Create dataset.
+    train_dataset = HDF5Dataset(train_hdf5files,
+        convert_to_channel_first=convert_to_channel_first,
+        pre_transforms=pre_transforms,
+        transforms=train_transforms,
+        load_into_ram=load_into_ram)
+    val_dataset = HDF5Dataset(val_hdf5files,
+        convert_to_channel_first=convert_to_channel_first,
+        pre_transforms=pre_transforms,
+        transforms=val_transforms,
+        load_into_ram=load_into_ram)
+    test_dataset = HDF5Dataset(test_hdf5files,
+        convert_to_channel_first=convert_to_channel_first,
+        pre_transforms=pre_transforms,
+        transforms=test_transforms,
+        load_into_ram=load_into_ram)
+    return train_dataset, val_dataset, test_dataset
+
+
+def create_dataloaders(train_dataset, val_dataset, test_dataset,
+                       feature_shape, token_shape, token_padding_val,
+                       batch_size, num_workers, shuffle):
+    merge_fn = partial(merge_padded_batch,
+                       feature_shape=feature_shape,
+                       token_shape=token_shape,
+                       feature_padding_val=0.0,
+                       token_padding_val=token_padding_val)
+    train_dataloader = DataLoader(
+        train_dataset, batch_size=batch_size, collate_fn=merge_fn,
+        shuffle=shuffle, num_workers=num_workers)
+    val_dataloader = DataLoader(
+        val_dataset, batch_size=batch_size, collate_fn=merge_fn,
+        shuffle=False)
+    test_dataloader = DataLoader(
+        test_dataset, batch_size=1, collate_fn=merge_fn,
+        shuffle=False)
+    return train_dataloader, val_dataloader, test_dataloader
+
+
 @dataclass
 class DataLoaderSettings():
     batch_size: int = 1
@@ -244,71 +353,22 @@ class DataLoaderSettings():
     def __post_init__(self):
         # Load files.
         files = list(self.dataset_dir.iterdir())
-        dictionary = [fin for fin in files if ".json" in fin.name][0]
-        hdf5_files = [fin for fin in files if ".json" not in fin.name]
-        if not self.include_swap:
-            hdf5_files = [fin for fin in hdf5_files if "_swap" not in fin.name]
+        train_hdf5files, val_hdf5files, test_hdf5files = load_dataset_files(
+            files, self.include_swap, self.val_pid, self.test_pid)
 
-        train_hdf5files = [fin for fin in hdf5_files if str(self.val_pid) not in fin.name]
-        train_hdf5files = [fin for fin in train_hdf5files if str(self.test_pid) not in fin.name]
-        val_hdf5files = [fin for fin in hdf5_files if str(self.val_pid) in fin.name]
-        test_hdf5files = [fin for fin in hdf5_files if str(self.test_pid) in fin.name]
+        self.key2token, self.token2key, self.vocaburary = load_dictionary(
+            files, self.task_type)
 
-        # Load dictionary.
-        with open(dictionary, "r") as fread:
-            self.key2token = json.load(fread)
-            self.token2key = {value: key for key, value in key2token.items()}
-        self.vocaburary = len(self.key2token)
-        if self.task_type == "cslr_s2s":
-            self.key2token["<sos>"] = self.vocaburary
-            self.key2token["<eos>"] = self.vocaburary + 1
-            self.key2token["<pad>"] = self.vocaburary + 2
-            self.token2key[self.vocaburary] = "<sos>"
-            self.token2key[self.vocaburary + 1] = "<eos>"
-            self.token2key[self.vocaburary + 2] = "<pad>"
-        elif self.task_type == "cslr_ctc":
-            self.key2token["<pad>"] = self.vocaburary
-            self.token2key[self.vocaburary] = "<pad>"
-        # Reset.
-        self.vocaburary = len(self.key2token)
+        pre_trans, train_trans, val_trans, test_trans = load_transforms(
+            self.pre_transforms_settings,
+            self.train_transforms_settings,
+            self.val_transforms_settings,
+            self.test_transforms_settings)
 
-        # Load transforms.
-        pre_transforms = []
-        for name, kwargs in self.pre_transforms_settings.items():
-            pre_transforms.append(get_transform(name, kwargs))
-        pre_transforms = Compose(pre_transforms)
-
-        train_transforms = []
-        for name, kwargs in self.train_transforms_settings.items():
-            train_transforms.append(get_transform(name, kwargs))
-        train_transforms = Compose(train_transforms)
-
-        val_transforms = []
-        for name, kwargs in self.val_transforms_settings.items():
-            val_transforms.append(get_transform(name, kwargs))
-        val_transforms = Compose(val_transforms)
-
-        test_transforms = []
-        for name, kwargs in self.test_transforms_settings.items():
-            test_transforms.append(get_transform(name, kwargs))
-        test_transforms = Compose(test_transforms)
-
-        # Create dataset.
-        train_dataset = HDF5Dataset(train_hdf5files,
-            convert_to_channel_first=self.convert_to_channel_first,
-            pre_transforms=pre_transforms,
-            transforms=train_transforms,
-            load_into_ram=self.load_into_ram)
-        val_dataset = HDF5Dataset(val_hdf5files,
-            convert_to_channel_first=self.convert_to_channel_first,
-            pre_transforms=pre_transforms,
-            transforms=val_transforms,
-            load_into_ram=self.load_into_ram)
-        test_dataset = HDF5Dataset(test_hdf5files,
-            convert_to_channel_first=self.convert_to_channel_first,
-            pre_transforms=pre_transforms,
-            transforms=test_transforms,
-            load_into_ram=self.load_into_ram)
+        train_dataset, val_dataset, test_dataset = create_dataset(
+            train_hdf5files, val_hdf5files, test_hdf5files,
+            pre_trans, train_trans, val_trans, test_trans,
+            self.convert_to_channel_first, self.load_into_ram)
 
         # Create dataloaders.
         feature_shape = (len(self.use_features), -1, len(self.use_landmarks))
@@ -317,20 +377,10 @@ class DataLoaderSettings():
             token_padding_val = self.vocaburary + 1
         elif self.task_type in ["cslr_s2s", "cslr_ctc"]:
             token_padding_val = self.key2token["<pad>"]
-        merge_fn = partial(merge_padded_batch,
-                           feature_shape=feature_shape,
-                           token_shape=token_shape,
-                           feature_padding_val=0.0,
-                           token_padding_val=token_padding_val)
-        self.train_dataloader = DataLoader(
-            train_dataset, batch_size=self.batch_size, collate_fn=merge_fn,
-            shuffle=self.shuffle, num_workers=self.num_workers)
-        self.val_dataloader = DataLoader(
-            val_dataset, batch_size=self.batch_size, collate_fn=merge_fn,
-            shuffle=False)
-        self.test_dataloader = DataLoader(
-            test_dataset, batch_size=1, collate_fn=merge_fn,
-            shuffle=False)
+        self.train_dataloader, self.val_dataloader, self.test_dataloader = create_dataloaders(
+            train_dataset, val_dataset, test_dataset,
+            feature_shape, token_shape, token_padding_val,
+            self.batch_size, self.num_workers, self.shuffle)
 
         # Set estimated feature size.
         self.in_channels = len(self.use_features) * len(self.use_landmarks)
