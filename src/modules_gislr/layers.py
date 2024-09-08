@@ -1706,7 +1706,7 @@ class TransformerCSLR(nn.Module):
             pid = torch.argmax(pred, dim=-1)
             dec_inputs = torch.cat([dec_inputs, pid], dim=-1)
 
-            pid = pid.reshape([1]).detach().cpu().numpy()
+            pid = pid.reshape([1]).detach().cpu().numpy()[0]
             pred_ids.append(int(pid))
             if int(pid) == end_id:
                 break
