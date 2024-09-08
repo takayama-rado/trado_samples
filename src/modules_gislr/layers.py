@@ -822,7 +822,7 @@ class RNNCSLR(nn.Module):
             pid = torch.argmax(pred, dim=-1)
             dec_inputs = pid
 
-            pid = pid.reshape([1]).detach().cpu().numpy()
+            pid = pid.reshape([1]).detach().cpu().numpy()[0]
             pred_ids.append(int(pid))
             if int(pid) == end_id:
                 break
