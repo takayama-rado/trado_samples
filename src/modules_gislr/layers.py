@@ -327,6 +327,511 @@ class RNNISLR(nn.Module):
         return logit
 
 
+class BahdanauAttentionEnergy(nn.Module):
+    def __init__(self,
+                 key_dim,
+                 query_dim,
+                 att_dim,
+                 add_bias=False):
+        super().__init__()
+
+        self.w_key = nn.Linear(key_dim, att_dim, bias=add_bias)
+        self.w_query = nn.Linear(query_dim, att_dim, bias=add_bias)
+        self.w_out = nn.Linear(att_dim, 1, bias=add_bias)
+
+    def forward(self, key, query):
+        # print("key:", key.shape)
+        # print("query:", query.shape)
+        # key: `[N, key_len, key_dim]`
+        # query: `[N, 1, query_dim]`
+        key = self.w_key(key)
+        query = self.w_query(query)
+        # Adding with broadcasting.
+        # key: `[N, key_len, key_dim]`
+        # query: `[N, 1, query_dim]`
+        # query should be broadcasted to `[N, key_len, query_dim]`
+        temp = key + query
+        # `[N, key_len, att_dim] -> [N, key_len, 1] -> [N, 1, key_len]`
+        energy = self.w_out(torch.tanh(temp))
+        energy = torch.permute(energy, [0, 2, 1])
+        return energy
+
+
+class LuongDotAttention(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, key, query):
+        # key: `[N, key_len, key_dim]`
+        # query: `[N, 1, query_dim]`
+        # key_dim == query_dim
+        # bmm: `[n, a, b] x [n, b, c] -> [n, a, c]`
+        # `[N, key_len, 1] -> [N, 1, key_len]`
+        energy = torch.bmm(key, torch.permute(query, [0, 2, 1]))
+        energy = torch.permute(energy, [0, 2, 1])
+        return energy
+
+
+class LuongGeneralAttention(nn.Module):
+    def __init__(self,
+                 key_dim,
+                 query_dim,
+                 add_bias=False):
+        super().__init__()
+
+        self.w_key = nn.Linear(key_dim, query_dim, bias=add_bias)
+
+    def forward(self, key, query):
+        key = self.w_key(key)
+        # key: `[N, key_len, query_dim]`
+        # query: `[N, 1, query_dim]`
+        # bmm: `[n, a, b] x [n, b, c] -> [n, a, c]`
+        # `[N, key_len, 1] -> [N, 1, key_len]`
+        energy = torch.bmm(key, torch.permute(query, [0, 2, 1]))
+        energy = torch.permute(energy, [0, 2, 1])
+        return energy
+
+
+class SingleHeadAttention(nn.Module):
+    def __init__(self,
+                 key_dim,
+                 query_dim,
+                 att_dim,
+                 add_bias,
+                 att_type):
+        super().__init__()
+        assert att_type in ["bahdanau", "luong_dot", "luong_general"]
+
+        if att_type == "bahdanau":
+            self.att_energy = BahdanauAttentionEnergy(
+                key_dim=key_dim,
+                query_dim=query_dim,
+                att_dim=att_dim,
+                add_bias=add_bias)
+        elif att_type == "luong_dot":
+            self.att_energy = LuongDotAttention()
+        elif att_type == "luong_general":
+            self.att_energy = LuongGeneralAttention(
+                key_dim=key_dim,
+                query_dim=query_dim,
+                add_bias=add_bias)
+
+        self.neg_inf = None
+
+    def forward(self,
+                key,
+                value,
+                query,
+                mask=None):
+        if self.neg_inf is None:
+            self.neg_inf = float(np.finfo(
+                torch.tensor(0, dtype=key.dtype).numpy().dtype).min)
+
+        batch, klen, kdim = key.shape
+        _, qlen, qdim = query.shape
+        energy = self.att_energy(key=key, query=query)
+        assert energy.shape == (batch, qlen, klen)
+
+        # Apply mask.
+        if mask is not None:
+            if len(mask.shape) == 2:
+                # `[N, klen] -> [N, qlen(=1), klen]`
+                mask = mask.unsqueeze(1)
+            # Negative infinity should be 0 in softmax.
+            energy = energy.masked_fill_(mask==0, self.neg_inf)
+
+        # Compute attention mask.
+        attw = torch.softmax(energy, dim=-1)
+        # attw: `[N, qlen, klen]`
+        # value: `[N, klen, kdim]`
+        # bmm: `[N, qlen, klen] x [N, klen, kdim] -> [N, qlen, kdim]`
+        cvec = torch.bmm(attw, value)
+        return cvec, attw
+
+
+class BahdanauRNNDecoder(nn.Module):
+    def __init__(self,
+                 in_channels,
+                 hidden_channels,
+                 out_channels,
+                 emb_channels,
+                 att_type,
+                 att_dim,
+                 att_add_bias,
+                 rnn_type,
+                 num_layers,
+                 activation,
+                 dropout,
+                 padding_val,
+                 proj_size=0):
+        super().__init__()
+        assert rnn_type in ["srnn", "lstm", "gru"]
+
+        self.emb_layer = nn.Embedding(
+            num_embeddings=out_channels,
+            embedding_dim=emb_channels,
+            padding_idx=padding_val)
+
+        self.att_layer = SingleHeadAttention(
+            key_dim=in_channels,
+            query_dim=hidden_channels,
+            att_dim=att_dim,
+            add_bias=att_add_bias,
+            att_type=att_type)
+
+        if rnn_type == "srnn":
+            self.rnn = nn.RNN(input_size=in_channels + emb_channels,
+                              hidden_size=hidden_channels,
+                              num_layers=num_layers,
+                              nonlinearity=activation,
+                              batch_first=True,
+                              dropout=dropout,
+                              bidirectional=False)
+        elif rnn_type == "lstm":
+            self.rnn = nn.LSTM(input_size=in_channels + emb_channels,
+                               hidden_size=hidden_channels,
+                               num_layers=num_layers,
+                               batch_first=True,
+                               dropout=dropout,
+                               bidirectional=False,
+                               proj_size=proj_size)
+        elif rnn_type == "gru":
+            self.rnn = nn.GRU(input_size=in_channels + emb_channels,
+                              hidden_size=hidden_channels,
+                              num_layers=num_layers,
+                              batch_first=True,
+                              dropout=dropout,
+                              bidirectional=False)
+        self.head = nn.Linear(hidden_channels, out_channels)
+
+        self.num_layers = num_layers
+        self.dec_hstate = None
+        self.attw = None
+
+    def init_dec_hstate(self, enc_hstate, init_as_zero=False):
+        if init_as_zero:
+            dec_hstate = torch.zeros_like(enc_hstate)
+        else:
+            dec_hstate = enc_hstate
+        # To avoid error at RNN layer.
+        self.dec_hstate = dec_hstate.contiguous()
+
+    def forward(self,
+                dec_inputs,
+                enc_seqs,
+                enc_mask):
+        assert self.dec_hstate is not None, f"dec_hstate has not been initialized."
+        dec_hstate = self.dec_hstate
+        # print("dec_hstate:", dec_hstate.shape)
+
+        # Attention layer requires hidden state of 2nd rnn layer.
+        # as `[N, 1, C]`
+        query = dec_hstate[-1].unsqueeze(1)
+        cvec, self.attw = self.att_layer(
+            key=enc_seqs,
+            value=enc_seqs,
+            query=query,
+            mask=enc_mask)
+
+        emb_out = self.emb_layer(dec_inputs)
+        # `[N, C] -> [N, 1, C]`
+        emb_out = emb_out.reshape([-1, 1, emb_out.shape[-1]])
+        feature = torch.cat([cvec, emb_out], dim=-1)
+        if isinstance(self.rnn, nn.LSTM):
+            hidden_seqs, (last_hstate, last_cstate) = self.rnn(feature,
+                                                               dec_hstate)
+        else:
+            hidden_seqs, last_hstate = self.rnn(feature,
+                                                dec_hstate)
+            last_cstate = None
+
+        output_dec = self.head(hidden_seqs)
+        self.dec_hstate = last_hstate
+        return output_dec
+
+
+class LuongRNNDecoder(nn.Module):
+    def __init__(self,
+                 in_channels,
+                 hidden_channels,
+                 out_channels,
+                 emb_channels,
+                 att_type,
+                 att_dim,
+                 att_add_bias,
+                 rnn_type,
+                 num_layers,
+                 activation,
+                 dropout,
+                 padding_val,
+                 proj_size=0):
+        super().__init__()
+        assert rnn_type in ["srnn", "lstm", "gru"]
+
+        self.emb_layer = nn.Embedding(
+            num_embeddings=out_channels,
+            embedding_dim=emb_channels,
+            padding_idx=padding_val)
+        self.vocab_size = out_channels
+
+        if rnn_type == "srnn":
+            self.rnn = nn.RNN(input_size=emb_channels,
+                              hidden_size=hidden_channels,
+                              num_layers=num_layers,
+                              nonlinearity=activation,
+                              batch_first=True,
+                              dropout=dropout,
+                              bidirectional=False)
+        elif rnn_type == "lstm":
+            self.rnn = nn.LSTM(input_size=emb_channels,
+                               hidden_size=hidden_channels,
+                               num_layers=num_layers,
+                               batch_first=True,
+                               dropout=dropout,
+                               bidirectional=False,
+                               proj_size=proj_size)
+        elif rnn_type == "gru":
+            self.rnn = nn.GRU(input_size=emb_channels,
+                              hidden_size=hidden_channels,
+                              num_layers=num_layers,
+                              batch_first=True,
+                              dropout=dropout,
+                              bidirectional=False)
+
+        self.att_layer = SingleHeadAttention(
+            key_dim=in_channels,
+            query_dim=hidden_channels,
+            att_dim=att_dim,
+            add_bias=att_add_bias,
+            att_type=att_type)
+
+        self.head = nn.Linear(hidden_channels * 2,  # hstate + cvec
+                              out_channels)
+
+        self.num_layers = num_layers
+        self.dec_hstate = None
+        self.attw = None
+
+    def init_dec_hstate(self, enc_hstate, init_as_zero=False):
+        if init_as_zero:
+            dec_hstate = torch.zeros_like(enc_hstate)
+        else:
+            dec_hstate = enc_hstate
+        # To avoid error at RNN layer.
+        self.dec_hstate = dec_hstate.contiguous()
+
+    def forward(self,
+                dec_inputs,
+                enc_seqs,
+                enc_mask):
+
+        assert self.dec_hstate is not None, f"dec_hstate has not been initialized."
+        dec_hstate = self.dec_hstate
+
+        emb_out = self.emb_layer(dec_inputs) * math.sqrt(self.vocab_size)
+        if isinstance(self.rnn, nn.LSTM):
+            hidden_seqs, (last_hstate, last_cstate) = self.rnn(emb_out,
+                                                               dec_hstate)
+        else:
+            hidden_seqs, last_hstate = self.rnn(emb_out,
+                                                dec_hstate)
+            last_cstate = None
+
+        # Attention layer requires hidden state of 2nd rnn layer.
+        # as `[N, 1, C]`
+        query = last_hstate[-1].unsqueeze(1)
+        cvec, self.attw = self.att_layer(
+            key=enc_seqs,
+            value=enc_seqs,
+            query=query,
+            mask=enc_mask)
+
+        # `[N, 1, C]`
+        feature = torch.cat([cvec, hidden_seqs], dim=-1)
+
+        output_dec = self.head(feature)
+        self.dec_hstate = last_hstate
+        return output_dec
+
+
+class RNNCSLR(nn.Module):
+    def __init__(self,
+                 enc_in_channels,
+                 enc_hidden_channels,
+                 enc_rnn_type,
+                 enc_num_layers,
+                 enc_activation,
+                 enc_bidir,
+                 enc_dropout,
+                 enc_apply_mask,
+                 enc_proj_size,
+                 dec_type,
+                 dec_in_channels,
+                 dec_hidden_channels,
+                 dec_out_channels,
+                 dec_emb_channels,
+                 dec_att_type,
+                 dec_att_dim,
+                 dec_att_add_bias,
+                 dec_rnn_type,
+                 dec_num_layers,
+                 dec_activation,
+                 dec_dropout,
+                 dec_padding_val,
+                 dec_proj_size):
+        super().__init__()
+        assert dec_type in ["bahdanau", "luong"]
+        self.enc_bidir = enc_bidir
+
+        self.linear = nn.Linear(enc_in_channels, enc_hidden_channels)
+        self.enc_activation = nn.ReLU()
+
+        self.encoder = RNNEncoder(
+            in_channels=enc_hidden_channels,
+            out_channels=enc_hidden_channels,
+            rnn_type=enc_rnn_type,
+            num_layers=enc_num_layers,
+            activation=enc_activation,
+            bidir=enc_bidir,
+            dropout=enc_dropout,
+            apply_mask=enc_apply_mask,
+            proj_size=enc_proj_size)
+
+        if enc_bidir:
+            dec_in_channels *= 2
+            dec_hidden_channels *= 2
+            dec_att_dim *= 2
+
+        if dec_type == "bahdanau":
+            self.decoder = BahdanauRNNDecoder(
+                in_channels=dec_in_channels,
+                hidden_channels=dec_hidden_channels,
+                out_channels=dec_out_channels,
+                emb_channels=dec_emb_channels,
+                att_type=dec_att_type,
+                att_dim=dec_att_dim,
+                att_add_bias=dec_att_add_bias,
+                rnn_type=dec_rnn_type,
+                num_layers=dec_num_layers,
+                activation=dec_activation,
+                dropout=dec_dropout,
+                padding_val=dec_padding_val,
+                proj_size=dec_proj_size)
+        elif dec_type == "luong":
+            self.decoder = LuongRNNDecoder(
+                in_channels=dec_in_channels,
+                hidden_channels=dec_hidden_channels,
+                out_channels=dec_out_channels,
+                emb_channels=dec_emb_channels,
+                att_type=dec_att_type,
+                att_dim=dec_att_dim,
+                att_add_bias=dec_att_add_bias,
+                rnn_type=dec_rnn_type,
+                num_layers=dec_num_layers,
+                activation=dec_activation,
+                dropout=dec_dropout,
+                padding_val=dec_padding_val,
+                proj_size=dec_proj_size)
+
+    def _apply_encoder(self, feature, feature_pad_mask=None):
+        # Feature extraction.
+        # `[N, C, T, J] -> [N, T, C, J] -> [N, T, C*J] -> [N, T, C']`
+        N, C, T, J = feature.shape
+        feature = feature.permute([0, 2, 1, 3])
+        feature = feature.reshape(N, T, -1)
+
+        # print("feature0:", feature.shape)
+        feature = self.linear(feature)
+        feature = self.enc_activation(feature)
+        # print("feature1:", feature.shape)
+
+        # Apply encoder.
+        enc_seqs, enc_hstate = self.encoder(feature, feature_pad_mask)[:2]
+
+        # Basically, decoder should not be bidirectional.
+        # So, we should concatenate backwarded feature.
+        if self.enc_bidir:
+            # `[2*layers, N, C] -> [layers, N, 2*C]`
+            enc_hstate = torch.permute(enc_hstate, [1, 0, 2])
+            enc_hstate = enc_hstate.reshape([enc_hstate.shape[0],
+                                             enc_hstate.shape[1] // 2,
+                                             -1])
+            enc_hstate = torch.permute(enc_hstate, [1, 0, 2])
+        return enc_seqs, enc_hstate
+
+    def forward(self,
+                feature, tokens,
+                feature_pad_mask=None, tokens_pad_mask=None):
+        """Forward computation for train.
+        """
+        # print("feature:", feature.shape)
+        # print("tokens:", tokens.shape)
+
+        enc_seqs, enc_hstate = self._apply_encoder(feature, feature_pad_mask)
+
+        # Apply decoder.
+        # print("enc_seqs:", enc_seqs.shape)
+        # print("enc_hstate:", enc_hstate.shape)
+        self.decoder.init_dec_hstate(enc_hstate)
+        dec_inputs = tokens[:, 0:1]
+        preds = None
+        for t_index in range(1, tokens.shape[-1]):
+            pred = self.decoder(
+                dec_inputs=dec_inputs,
+                enc_seqs=enc_seqs,
+                enc_mask=feature_pad_mask)
+            if preds is None:
+                preds = pred
+            else:
+                # `[N, T, C]`
+                preds = torch.cat([preds, pred], dim=1)
+
+            # Teacher forcing.
+            dec_inputs = tokens[:, t_index:t_index+1]
+        return preds
+
+    def inference(self,
+                  feature,
+                  start_id,
+                  end_id,
+                  feature_pad_mask=None,
+                  max_seqlen=10):
+        """Forward computation for test.
+        """
+
+        enc_seqs, enc_hstate = self._apply_encoder(feature, feature_pad_mask)
+
+        # Apply decoder.
+        self.decoder.init_dec_hstate(enc_hstate)
+        dec_inputs = torch.tensor([start_id]).to(feature.device)
+        # `[N, T]`
+        dec_inputs = dec_inputs.reshape([1, 1])
+        preds = None
+        pred_ids = [start_id]
+        for _ in range(max_seqlen):
+            pred = self.decoder(
+                dec_inputs=dec_inputs,
+                enc_seqs=enc_seqs,
+                enc_mask=feature_pad_mask)
+            if preds is None:
+                preds = pred
+            else:
+                # `[N, T, C]`
+                preds = torch.cat([preds, pred], dim=1)
+
+            pid = torch.argmax(pred, dim=-1)
+            dec_inputs = pid
+
+            pid = pid.reshape([1]).detach().cpu().numpy()
+            pred_ids.append(int(pid))
+            if int(pid) == end_id:
+                break
+
+        # `[N, T]`
+        pred_ids = np.array([pred_ids])
+        return pred_ids, preds
+
+
 class PositionalEncoding(nn.Module):
     def __init__(self,
                  dim_model: int,
