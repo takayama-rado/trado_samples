@@ -192,6 +192,10 @@ def merge_padded_batch(batch,
     # ==========================================================
     # `[B, L]`
     merged_shape = [len(batch), *token_shape]
+    # Use maximum token length in a batch as padded length.
+    if merged_shape[1] == -1:
+        tlen = max([token.shape[0] for token in token_batch])
+        merged_shape[1] = tlen
     merged_token = merge(token_batch, merged_shape, padding_val=token_padding_val)
 
     # Generate padding mask.
@@ -233,6 +237,9 @@ class DataLoaderSettings():
     train_transforms_settings: Dict[str, Any] = field(default_factory=lambda: {})
     val_transforms_settings: Dict[str, Any] = field(default_factory=lambda: {})
     test_transforms_settings: Dict[str, Any] = field(default_factory=lambda: {})
+    # Task.
+    task_type: str = "islr"
+    num_workers: int = 2
 
     def __post_init__(self):
         # Load files.
@@ -250,7 +257,19 @@ class DataLoaderSettings():
         # Load dictionary.
         with open(dictionary, "r") as fread:
             self.key2token = json.load(fread)
-            self.token2key = {value: key for key, value in self.key2token.items()}
+            self.token2key = {value: key for key, value in key2token.items()}
+        self.vocaburary = len(self.key2token)
+        if self.task_type == "cslr_s2s":
+            self.key2token["<sos>"] = self.vocaburary
+            self.key2token["<eos>"] = self.vocaburary + 1
+            self.key2token["<pad>"] = self.vocaburary + 2
+            self.token2key[self.vocaburary] = "<sos>"
+            self.token2key[self.vocaburary + 1] = "<eos>"
+            self.token2key[self.vocaburary + 2] = "<pad>"
+        elif self.task_type == "cslr_ctc":
+            self.key2token["<pad>"] = self.vocaburary
+            self.token2key[self.vocaburary] = "<pad>"
+        # Reset.
         self.vocaburary = len(self.key2token)
 
         # Load transforms.
@@ -293,15 +312,19 @@ class DataLoaderSettings():
 
         # Create dataloaders.
         feature_shape = (len(self.use_features), -1, len(self.use_landmarks))
-        token_shape = (1,)
+        token_shape = (-1,)
+        if self.task_type == "islr":
+            token_padding_val = self.vocaburary + 1
+        elif self.task_type in ["cslr_s2s", "cslr_ctc"]:
+            token_padding_val = self.key2token["<pad>"]
         merge_fn = partial(merge_padded_batch,
                            feature_shape=feature_shape,
                            token_shape=token_shape,
                            feature_padding_val=0.0,
-                           token_padding_val=self.vocaburary+1)
+                           token_padding_val=token_padding_val)
         self.train_dataloader = DataLoader(
             train_dataset, batch_size=self.batch_size, collate_fn=merge_fn,
-            shuffle=self.shuffle)
+            shuffle=self.shuffle, num_workers=self.num_workers)
         self.val_dataloader = DataLoader(
             val_dataset, batch_size=self.batch_size, collate_fn=merge_fn,
             shuffle=False)
