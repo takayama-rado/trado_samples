@@ -389,7 +389,7 @@ class MultiheadAttention(nn.Module):
 
         self.neg_inf = None
 
-        self.qkv_same_dim = self.key_dim == self.query_dim
+        self.qkv_same_dim = key_dim == query_dim
         self.reset_parameters(add_bias)
 
     def reset_parameters(self, add_bias):
