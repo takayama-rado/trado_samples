@@ -733,6 +733,8 @@ class RNNCSLR(nn.Module):
                 padding_val=dec_padding_val,
                 proj_size=dec_proj_size)
 
+        self.attws = None
+
     def _apply_encoder(self, feature, feature_pad_mask=None):
         # Feature extraction.
         # `[N, C, T, J] -> [N, T, C, J] -> [N, T, C*J] -> [N, T, C']`
@@ -798,6 +800,7 @@ class RNNCSLR(nn.Module):
                   max_seqlen=10):
         """Forward computation for test.
         """
+        self.attws = None
 
         enc_seqs, enc_hstate = self._apply_encoder(feature, feature_pad_mask)
 
@@ -818,6 +821,13 @@ class RNNCSLR(nn.Module):
             else:
                 # `[N, T, C]`
                 preds = torch.cat([preds, pred], dim=1)
+            # Store attention.
+            # attw: `[N, qlen, klen]`
+            attw = self.decoder.attw.detach().cpu()
+            if self.attws is None:
+                self.attws = attw
+            else:
+                self.attws = torch.cat([self.attws, attw], dim=1)
 
             pid = torch.argmax(pred, dim=-1)
             dec_inputs = pid
