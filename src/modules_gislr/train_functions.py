@@ -386,15 +386,17 @@ def val_loop_csir_s2s(dataloader,
     return retval
 
 
-def inference(model, feature, start_id, end_id):
+def inference(model, feature, start_id, end_id, max_seqlen):
     if isinstance(model, RNNCSLR):
         pred_ids, _ = model.inference(feature,
                                       start_id,
-                                      end_id)
+                                      end_id,
+                                      max_seqlen=max_seqlen)
     elif isinstance(model, TransformerCSLR):
         pred_ids, _ = model.inference(feature,
                                       start_id,
-                                      end_id)
+                                      end_id,
+                                      max_seqlen=max_seqlen)
     else:
         raise NotImplementedError(f"Unknown model type:{type(model)}.")
     return pred_ids
@@ -405,6 +407,7 @@ def test_loop_csir_s2s(dataloader,
                        device,
                        start_id,
                        end_id,
+                       max_seqlen=62,
                        use_normalized_wer=False,
                        return_pred_times=False):
     size = len(dataloader.dataset)
@@ -433,7 +436,7 @@ def test_loop_csir_s2s(dataloader,
 
         # Predict.
         pred_start = time.perf_counter()
-        pred_ids = inference(model, feature, start_id, end_id)
+        pred_ids = inference(model, feature, start_id, end_id, max_seqlen)
         pred_end = time.perf_counter()
         pred_times.append([frames, pred_end - pred_start])
 
