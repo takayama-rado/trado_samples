@@ -797,7 +797,7 @@ class RNNCSLR(nn.Module):
                   start_id,
                   end_id,
                   feature_pad_mask=None,
-                  max_seqlen=10):
+                  max_seqlen=62):
         """Forward computation for test.
         """
         self.attws = None
@@ -1673,7 +1673,7 @@ class TransformerCSLR(nn.Module):
                   start_id,
                   end_id,
                   src_padding_mask=None,
-                  max_seqlen=10):
+                  max_seqlen=62):
         """Forward computation for test.
         """
 
