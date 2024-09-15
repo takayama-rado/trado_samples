@@ -329,52 +329,53 @@ def val_loop_csir_s2s(dataloader,
     # Collect prediction time.
     pred_times = []
 
-    # Switch to training mode.
-    model.train()
+    # Switch to evaluation mode.
+    model.eval()
     # Main loop.
     print("Start validation.")
     start = time.perf_counter()
-    for batch_idx, batch_sample in enumerate(dataloader):
-        feature = batch_sample["feature"]
-        feature_pad_mask = batch_sample["feature_pad_mask"]
-        tokens = batch_sample["token"]
-        tokens_pad_mask = batch_sample["token_pad_mask"]
-
-        check_tokens_format(tokens, tokens_pad_mask, start_id, end_id)
-
-        feature = feature.to(device)
-        feature_pad_mask = feature_pad_mask.to(device)
-        tokens = tokens.to(device)
-        tokens_pad_mask = tokens_pad_mask.to(device)
-
-        frames = feature.shape[-2]
-
-        # Predict.
-        pred_start = time.perf_counter()
-        preds = forward(model, feature, tokens,
-                        feature_pad_mask, tokens_pad_mask)
-        pred_end = time.perf_counter()
-        pred_times.append([frames, pred_end - pred_start])
-
-        # Compute loss.
-        # Preds do not include <start>, so skip that of tokens.
-        loss = 0
-        if isinstance(loss_fn, nn.CrossEntropyLoss):
-            for t_index in range(1, tokens.shape[-1]):
-                pred = preds[:, t_index-1, :]
-                token = tokens[:, t_index]
-                loss += loss_fn(pred, token)
-            loss /= tokens.shape[-1]
-        # LabelSmoothingCrossEntropyLoss
-        else:
-            # `[N, T, C] -> [N, C, T]`
-            preds = preds.permute([0, 2, 1])
-            # Remove prediction after the last token.
-            if preds.shape[-1] == tokens.shape[-1]:
-                preds = preds[:, :, :-1]
-            loss = loss_fn(preds, tokens[:, 1:])
-
-        val_loss += loss.item()
+    with torch.no_grad():
+        for batch_idx, batch_sample in enumerate(dataloader):
+            feature = batch_sample["feature"]
+            feature_pad_mask = batch_sample["feature_pad_mask"]
+            tokens = batch_sample["token"]
+            tokens_pad_mask = batch_sample["token_pad_mask"]
+     
+            check_tokens_format(tokens, tokens_pad_mask, start_id, end_id)
+     
+            feature = feature.to(device)
+            feature_pad_mask = feature_pad_mask.to(device)
+            tokens = tokens.to(device)
+            tokens_pad_mask = tokens_pad_mask.to(device)
+     
+            frames = feature.shape[-2]
+     
+            # Predict.
+            pred_start = time.perf_counter()
+            preds = forward(model, feature, tokens,
+                            feature_pad_mask, tokens_pad_mask)
+            pred_end = time.perf_counter()
+            pred_times.append([frames, pred_end - pred_start])
+     
+            # Compute loss.
+            # Preds do not include <start>, so skip that of tokens.
+            loss = 0
+            if isinstance(loss_fn, nn.CrossEntropyLoss):
+                for t_index in range(1, tokens.shape[-1]):
+                    pred = preds[:, t_index-1, :]
+                    token = tokens[:, t_index]
+                    loss += loss_fn(pred, token)
+                loss /= tokens.shape[-1]
+            # LabelSmoothingCrossEntropyLoss
+            else:
+                # `[N, T, C] -> [N, C, T]`
+                preds = preds.permute([0, 2, 1])
+                # Remove prediction after the last token.
+                if preds.shape[-1] == tokens.shape[-1]:
+                    preds = preds[:, :, :-1]
+                loss = loss_fn(preds, tokens[:, 1:])
+     
+            val_loss += loss.item()
     print(f"Done. Time:{time.perf_counter()-start}")
 
     # Average loss.
@@ -408,7 +409,6 @@ def test_loop_csir_s2s(dataloader,
                        start_id,
                        end_id,
                        max_seqlen=62,
-                       use_normalized_wer=False,
                        return_pred_times=False):
     size = len(dataloader.dataset)
     total_wer = 0
@@ -416,44 +416,42 @@ def test_loop_csir_s2s(dataloader,
     # Collect prediction time.
     pred_times = []
 
-    # Switch to training mode.
-    model.train()
+    # Switch to evaluation mode.
+    model.eval()
     # Main loop.
     print("Start test.")
     start = time.perf_counter()
-    for batch_idx, batch_sample in enumerate(dataloader):
-        feature = batch_sample["feature"]
-        tokens = batch_sample["token"]
-        tokens_pad_mask = batch_sample["token_pad_mask"]
-
-        check_tokens_format(tokens, tokens_pad_mask, start_id, end_id)
-
-        feature = feature.to(device)
-        tokens = tokens.to(device)
-        tokens_pad_mask = tokens_pad_mask.to(device)
-
-        frames = feature.shape[-2]
-
-        # Predict.
-        pred_start = time.perf_counter()
-        pred_ids = inference(model, feature, start_id, end_id, max_seqlen)
-        pred_end = time.perf_counter()
-        pred_times.append([frames, pred_end - pred_start])
-
-        # Compute WER.
-        # <sos> and <eos> should be removed because they may boost performance.
-        # print(tokens)
-        # print(pred_ids)
-        tokens = tokens[0, 1:-1]
-        # pred_ids = pred_ids[0, 1:-1]
-        pred_ids = [pid for pid in pred_ids[0] if pid not in [start_id, end_id]]
-        if use_normalized_wer:
-            ref_length = max(len(pred_ids), len(tokens))
-        else:
+    with torch.no_grad():
+        for batch_idx, batch_sample in enumerate(dataloader):
+            feature = batch_sample["feature"]
+            tokens = batch_sample["token"]
+            tokens_pad_mask = batch_sample["token_pad_mask"]
+     
+            check_tokens_format(tokens, tokens_pad_mask, start_id, end_id)
+     
+            feature = feature.to(device)
+            tokens = tokens.to(device)
+            tokens_pad_mask = tokens_pad_mask.to(device)
+     
+            frames = feature.shape[-2]
+     
+            # Predict.
+            pred_start = time.perf_counter()
+            pred_ids = inference(model, feature, start_id, end_id, max_seqlen)
+            pred_end = time.perf_counter()
+            pred_times.append([frames, pred_end - pred_start])
+     
+            # Compute WER.
+            # <sos> and <eos> should be removed because they may boost performance.
+            # print(tokens)
+            # print(pred_ids)
+            tokens = tokens[0, 1:-1]
+            # pred_ids = pred_ids[0, 1:-1]
+            pred_ids = [pid for pid in pred_ids[0] if pid not in [start_id, end_id]]
             ref_length = len(tokens)
-        wer = edit_distance(tokens, pred_ids)
-        wer /= ref_length
-        total_wer += wer
+            wer = edit_distance(tokens, pred_ids)
+            wer /= ref_length
+            total_wer += wer
     print(f"Done. Time:{time.perf_counter()-start}")
 
     # Average WER.
