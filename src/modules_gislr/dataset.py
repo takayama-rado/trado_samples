@@ -188,7 +188,7 @@ def merge_padded_batch(batch,
     merged_feature = merge(feature_batch, merged_shape, padding_val=feature_padding_val)
 
     # ==========================================================
-    # Merge tocken.
+    # Merge token.
     # ==========================================================
     # `[B, L]`
     merged_shape = [len(batch), *token_shape]
