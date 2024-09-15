@@ -775,9 +775,10 @@ class RNNCSLR(nn.Module):
         # print("enc_seqs:", enc_seqs.shape)
         # print("enc_hstate:", enc_hstate.shape)
         self.decoder.init_dec_hstate(enc_hstate)
-        dec_inputs = tokens[:, 0:1]
         preds = None
-        for t_index in range(1, tokens.shape[-1]):
+        for t_index in range(0, tokens.shape[-1]):
+            # Teacher forcing.
+            dec_inputs = tokens[:, t_index].reshape([-1, 1])
             pred = self.decoder(
                 dec_inputs=dec_inputs,
                 enc_seqs=enc_seqs,
@@ -787,9 +788,6 @@ class RNNCSLR(nn.Module):
             else:
                 # `[N, T, C]`
                 preds = torch.cat([preds, pred], dim=1)
-
-            # Teacher forcing.
-            dec_inputs = tokens[:, t_index:t_index+1]
         return preds
 
     def inference(self,
