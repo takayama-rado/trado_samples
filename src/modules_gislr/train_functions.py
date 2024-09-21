@@ -453,7 +453,11 @@ def test_loop_csir_s2s(dataloader,
             # <sos> and <eos> should be removed because they may boost performance.
             # print(tokens)
             # print(pred_ids)
-            tokens = tokens[0, 1:-1]
+            tokens = tokens[tokens_pad_mask]
+            if len(tokens.shape) == 2:
+                tokens = tokens[0, 1:-1]
+            else:
+                tokens = tokens[1:-1]
             # pred_ids = pred_ids[0, 1:-1]
             pred_ids = [pid for pid in pred_ids[0] if pid not in [start_id, end_id]]
             ref_length = len(tokens)
