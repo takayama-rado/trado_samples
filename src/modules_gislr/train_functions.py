@@ -203,14 +203,18 @@ def test_loop(dataloader, model, device, use_mask=False,
     return retval
 
 
-def forward(model, feature, tokens, feature_pad_mask, tokens_pad_mask):
+def forward(model, feature, tokens, feature_pad_mask, tokens_pad_mask,
+            tokens_causal_mask=None):
     if isinstance(model, RNNCSLR):
         preds = model(feature,
                       tokens,
                       feature_pad_mask=feature_pad_mask,
                       tokens_pad_mask=tokens_pad_mask)
     elif isinstance(model, TransformerCSLR):
-        tokens_causal_mask = make_causal_mask(tokens_pad_mask)
+        if tokens_causal_mask is None:
+            tokens_causal_mask = make_causal_mask(tokens_pad_mask)
+        if tokens_causal_mask.shape[-1] != tokens_pad_mask.shape[-1]:
+            tokens_causal_mask = make_causal_mask(tokens_pad_mask)
         preds = model(src_feature=feature,
                       tgt_feature=tokens,
                       src_causal_mask=None,
@@ -219,7 +223,7 @@ def forward(model, feature, tokens, feature_pad_mask, tokens_pad_mask):
                       tgt_padding_mask=tokens_pad_mask)
     else:
         raise NotImplementedError(f"Unknown model type:{type(model)}.")
-    return preds
+    return preds, tokens_causal_mask
 
 
 def check_tokens_format(tokens, tokens_pad_mask, start_id, end_id):
@@ -254,6 +258,7 @@ def train_loop_csir_s2s(dataloader,
     # Main loop.
     print("Start training.")
     start = time.perf_counter()
+    tokens_causal_mask = None
     for batch_idx, batch_sample in enumerate(dataloader):
         feature = batch_sample["feature"]
         feature_pad_mask = batch_sample["feature_pad_mask"]
@@ -271,8 +276,9 @@ def train_loop_csir_s2s(dataloader,
 
         # Predict.
         pred_start = time.perf_counter()
-        preds = forward(model, feature, tokens,
-                        feature_pad_mask, tokens_pad_mask)
+        preds, tokens_causal_mask = forward(model, feature, tokens,
+                                            feature_pad_mask, tokens_pad_mask,
+                                            tokens_causal_mask)
         pred_end = time.perf_counter()
         pred_times.append([frames, pred_end - pred_start])
 
@@ -334,6 +340,7 @@ def val_loop_csir_s2s(dataloader,
     # Main loop.
     print("Start validation.")
     start = time.perf_counter()
+    tokens_causal_mask = None
     with torch.no_grad():
         for batch_idx, batch_sample in enumerate(dataloader):
             feature = batch_sample["feature"]
@@ -352,8 +359,9 @@ def val_loop_csir_s2s(dataloader,
      
             # Predict.
             pred_start = time.perf_counter()
-            preds = forward(model, feature, tokens,
-                            feature_pad_mask, tokens_pad_mask)
+            preds, tokens_causal_mask = forward(model, feature, tokens,
+                                                feature_pad_mask, tokens_pad_mask,
+                                                tokens_causal_mask)
             pred_end = time.perf_counter()
             pred_times.append([frames, pred_end - pred_start])
      
