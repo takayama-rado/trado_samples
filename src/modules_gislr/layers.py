@@ -1523,6 +1523,20 @@ class TransformerDecoder(nn.Module):
 
         self.head = nn.Linear(dim_model, out_channels)
 
+        self.reset_parameters(dim_model, padding_val)
+
+    def reset_parameters(self, embedding_dim, padding_val):
+        # Bellow initialization has strong effect to performance.
+        # Please refer.
+        # https://github.com/facebookresearch/fairseq/blob/main/fairseq/models/transformer/transformer_base.py#L189
+        nn.init.normal_(self.emb_layer.weight, mean=0, std=embedding_dim**-0.5)
+        nn.init.constant_(self.emb_layer.weight[padding_val], 0)
+
+        # Please refer.
+        # https://github.com/facebookresearch/fairseq/blob/main/fairseq/models/transformer/transformer_decoder.py
+        nn.init.xavier_uniform_(self.head.weight)
+        nn.init.constant_(self.head.bias, 0.0)
+
     def forward(self,
                 tgt_feature,
                 enc_feature,
