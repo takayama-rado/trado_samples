@@ -417,7 +417,8 @@ def test_loop_csir_s2s(dataloader,
                        start_id,
                        end_id,
                        max_seqlen=62,
-                       return_pred_times=False):
+                       return_pred_times=False,
+                       verbose_num=1):
     size = len(dataloader.dataset)
     total_wer = 0
 
@@ -453,6 +454,13 @@ def test_loop_csir_s2s(dataloader,
             # <sos> and <eos> should be removed because they may boost performance.
             # print(tokens)
             # print(pred_ids)
+            if batch_idx < verbose_num:
+                print("="*40)
+                print("Verbose output")
+            if batch_idx < verbose_num:
+                print(f"Tokens_w_keywords: {tokens}")
+                print(f"Preds_w_keywords: {pred_ids}")
+
             tokens = tokens[tokens_pad_mask]
             if len(tokens.shape) == 2:
                 tokens = tokens[0, 1:-1]
@@ -460,10 +468,17 @@ def test_loop_csir_s2s(dataloader,
                 tokens = tokens[1:-1]
             # pred_ids = pred_ids[0, 1:-1]
             pred_ids = [pid for pid in pred_ids[0] if pid not in [start_id, end_id]]
+            if batch_idx < verbose_num:
+                print(f"Tokens_wo_keywords: {tokens}")
+                print(f"Preds_wo_keywords: {pred_ids}")
+
             ref_length = len(tokens)
             wer = edit_distance(tokens, pred_ids)
             wer /= ref_length
             total_wer += wer
+            if batch_idx < verbose_num:
+                print(f"WER: {wer}")
+                print("="*40)
     print(f"Done. Time:{time.perf_counter()-start}")
 
     # Average WER.
