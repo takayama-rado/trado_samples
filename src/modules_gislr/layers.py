@@ -508,6 +508,20 @@ class BahdanauRNNDecoder(nn.Module):
         self.dec_hstate = None
         self.attw = None
 
+        self.reset_parameters(emb_channels, padding_val)
+
+    def reset_parameters(self, embedding_dim, padding_val):
+        # Bellow initialization has strong effect to performance.
+        # Please refer.
+        # https://github.com/facebookresearch/fairseq/blob/main/fairseq/models/transformer/transformer_base.py#L189
+        nn.init.normal_(self.emb_layer.weight, mean=0, std=embedding_dim**-0.5)
+        nn.init.constant_(self.emb_layer.weight[padding_val], 0)
+
+        # Please refer.
+        # https://github.com/facebookresearch/fairseq/blob/main/fairseq/models/transformer/transformer_decoder.py
+        nn.init.xavier_uniform_(self.head.weight)
+        nn.init.constant_(self.head.bias, 0.0)
+
     def init_dec_hstate(self, enc_hstate, init_as_zero=False):
         if init_as_zero:
             dec_hstate = torch.zeros_like(enc_hstate)
@@ -611,6 +625,20 @@ class LuongRNNDecoder(nn.Module):
         self.num_layers = num_layers
         self.dec_hstate = None
         self.attw = None
+
+        self.reset_parameters(emb_channels, padding_val)
+
+    def reset_parameters(self, embedding_dim, padding_val):
+        # Bellow initialization has strong effect to performance.
+        # Please refer.
+        # https://github.com/facebookresearch/fairseq/blob/main/fairseq/models/transformer/transformer_base.py#L189
+        nn.init.normal_(self.emb_layer.weight, mean=0, std=embedding_dim**-0.5)
+        nn.init.constant_(self.emb_layer.weight[padding_val], 0)
+
+        # Please refer.
+        # https://github.com/facebookresearch/fairseq/blob/main/fairseq/models/transformer/transformer_decoder.py
+        nn.init.xavier_uniform_(self.head.weight)
+        nn.init.constant_(self.head.bias, 0.0)
 
     def init_dec_hstate(self, enc_hstate, init_as_zero=False):
         if init_as_zero:
