@@ -134,8 +134,11 @@ def load_checkpoint(ckpt_path, model,
     np.random.set_state(checkpoint["np_random"])
     torch.set_rng_state(checkpoint["torch"])
     torch.random.set_rng_state(checkpoint["torch_random"])
-    torch.cuda.set_rng_state(checkpoint["cuda_random"])
-    torch.cuda.torch.cuda.set_rng_state_all(checkpoint["cuda_random_all"])
+    try:
+        torch.cuda.set_rng_state(checkpoint["cuda_random"])
+        torch.cuda.torch.cuda.set_rng_state_all(checkpoint["cuda_random_all"])
+    except:
+        pass
 
     if optimizer is not None:
         optimizer.load_state_dict(checkpoint["optimizer"])
