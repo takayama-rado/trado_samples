@@ -29,10 +29,10 @@ from torch import nn
 from nltk.metrics.distance import edit_distance
 
 # Local modules
-from .layers import (
-    RNNCSLR,
+from .layers.rnn import (
+    RNNCSLR)
+from .layers.transformer import (
     TransformerCSLR)
-
 from .utils import (
     make_causal_mask)
 
