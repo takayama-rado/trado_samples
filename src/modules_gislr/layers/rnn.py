@@ -16,20 +16,23 @@ from __future__ import division
 from __future__ import print_function
 from __future__ import unicode_literals
 
-
 import math
 
 # Third party's modules
 import numpy as np
 
 import torch
+
+from pydantic import (
+    Field)
+
 from torch import nn
 
 # Local modules
 from .misc import (
-    Identity,
-    GPoolRecognitionHead,
-    TemporalAttention)
+    ConfiguredModel,
+    GPoolRecognitionHeadSettings,
+    TemporalAttentionSettings)
 
 # Execution settings
 VERSION = u"%(prog)s dev"
@@ -40,45 +43,70 @@ DIR_INPUT = None
 DIR_OUTPUT = None
 
 
+class RNNSettings(ConfiguredModel):
+    in_channels: int = 64
+    out_channels: int = 64
+    rnn_type: str = Field(default="gru", pattern=r"srnn|lstm|gru")
+    num_layers: int = 1
+    activation: str = Field(default="tanh", pattern=r"tanh|relu")
+    bidir: bool = True
+    dropout: float = 0.1
+    proj_size: int = 0
+
+    def build_layer(self):
+        if self.rnn_type == "srnn":
+            rnn = nn.RNN(input_size=self.in_channels,
+                         hidden_size=self.out_channels,
+                         num_layers=self.num_layers,
+                         nonlinearity=self.activation,
+                         batch_first=True,
+                         dropout=self.dropout,
+                         bidirectional=self.bidir)
+        elif self.rnn_type == "lstm":
+            rnn = nn.LSTM(input_size=self.in_channels,
+                          hidden_size=self.out_channels,
+                          num_layers=self.num_layers,
+                          batch_first=True,
+                          dropout=self.dropout,
+                          bidirectional=self.bidir,
+                          proj_size=self.proj_size)
+        elif self.rnn_type == "gru":
+            rnn = nn.GRU(input_size=self.in_channels,
+                         hidden_size=self.out_channels,
+                         num_layers=self.num_layers,
+                         batch_first=True,
+                         dropout=self.dropout,
+                         bidirectional=self.bidir)
+        return rnn
+
+
+class RNNEncoderSettings(ConfiguredModel):
+    in_channels: int = 64
+    out_channels: int = 64
+    rnn_type: str = Field(default="gru", pattern=r"srnn|lstm|gru")
+    num_layers: int = 1
+    activation: str = Field(default="tanh", pattern=r"tanh|relu")
+    bidir: bool = True
+    dropout: float = 0.1
+    proj_size: int = 0
+    apply_mask: bool = True
+
+    def build_layer(self):
+        return RNNEncoder(self)
+
+
 class RNNEncoder(nn.Module):
     def __init__(self,
-                 in_channels,
-                 out_channels,
-                 rnn_type,
-                 num_layers,
-                 activation,
-                 bidir,
-                 dropout,
-                 apply_mask,
-                 proj_size=0):
+                 settings):
         super().__init__()
-        assert rnn_type in ["srnn", "lstm", "gru"]
+        assert isinstance(settings, RNNEncoderSettings)
+        self.settings = settings
 
-        if rnn_type == "srnn":
-            self.rnn = nn.RNN(input_size=in_channels,
-                              hidden_size=out_channels,
-                              num_layers=num_layers,
-                              nonlinearity=activation,
-                              batch_first=True,
-                              dropout=dropout,
-                              bidirectional=bidir)
-        elif rnn_type == "lstm":
-            self.rnn = nn.LSTM(input_size=in_channels,
-                               hidden_size=out_channels,
-                               num_layers=num_layers,
-                               batch_first=True,
-                               dropout=dropout,
-                               bidirectional=bidir,
-                               proj_size=proj_size)
-        elif rnn_type == "gru":
-            self.rnn = nn.GRU(input_size=in_channels,
-                              hidden_size=out_channels,
-                              num_layers=num_layers,
-                              batch_first=True,
-                              dropout=dropout,
-                              bidirectional=bidir)
-        self.num_layers = num_layers
-        self.apply_mask = apply_mask
+        rnn_settings = settings.model_dump(exclude={"apply_mask"})
+        rnn_settings = RNNSettings.model_validate(rnn_settings)
+        self.rnn = rnn_settings.build_layer()
+        self.num_layers = settings.num_layers
+        self.apply_mask = settings.apply_mask
 
     def sep_state_layerwise(self, last_state):
         # `[D * num_layers, N, C] -> [N, D * num_layers, C]`
@@ -111,59 +139,64 @@ class RNNEncoder(nn.Module):
         return hidden_seqs, last_hstate, last_cstate
 
 
+class RNNISLRSettings(ConfiguredModel):
+    in_channels: int = 64
+    hidden_channels: int = 64
+    out_channels: int = 64
+    masking_type: str = Field(default="both", pattern=r"none|rnn|head|both")
+    head_type: str = Field(default="gpool", pattern=r"gpool|last_state")
+
+    rnnen_settings: RNNEncoderSettings = Field(
+        default_factory=lambda: RNNEncoderSettings())
+    att_settings: TemporalAttentionSettings = Field(
+        default_factory=lambda: TemporalAttentionSettings())
+    head_settings: GPoolRecognitionHeadSettings = Field(
+        default_factory=lambda: GPoolRecognitionHeadSettings())
+
+    def model_post_init(self, __context):
+        # Adjust rnn_settings.
+        self.rnnen_settings.in_channels = self.hidden_channels
+        self.rnnen_settings.out_channels = self.hidden_channels
+        apply_mask = True if self.masking_type in ["rnn", "both"] else False
+        self.rnnen_settings.apply_mask = apply_mask
+        # Adjust att_settings.
+        if self.rnnen_settings.bidir:
+            self.att_settings.in_channels = self.hidden_channels * 2
+        else:
+            self.att_settings.in_channels = self.hidden_channels
+        # Adjust head_settings.
+        if self.rnnen_settings.bidir:
+            self.head_settings.in_channels = self.hidden_channels * 2
+        else:
+            self.head_settings.in_channels = self.hidden_channels
+        self.head_settings.out_channels = self.out_channels
+
+        # Propagate.
+        self.rnnen_settings.model_post_init(__context)
+        self.att_settings.model_post_init(__context)
+        self.head_settings.model_post_init(__context)
+
+    def build_layer(self):
+        return RNNISLR(self)
+
+
 class RNNISLR(nn.Module):
     def __init__(self,
-                 in_channels,
-                 hidden_channels,
-                 out_channels,
-                 rnn_type="lstm",
-                 rnn_num_layers=1,
-                 rnn_activation="tanh",
-                 rnn_bidir=False,
-                 rnn_dropout=0.1,
-                 apply_mask=True,
-                 masking_type="both",
-                 attention_type="none",
-                 attention_post_scale=False,
-                 head_type="gpool"):
+                 settings):
         super().__init__()
-        assert rnn_type in ["srnn", "lstm", "gru"]
-        assert masking_type in ["none", "rnn", "head", "both"]
-        assert attention_type in ["none", "sigmoid", "softmax"]
-        assert head_type in ["gpool", "last_state"]
+        assert isinstance(settings, RNNISLRSettings)
+        self.settings = settings
 
-        self.linear = nn.Linear(in_channels, hidden_channels)
+        self.linear = nn.Linear(settings.in_channels, settings.hidden_channels)
         self.activation = nn.ReLU()
 
-        apply_mask = True if masking_type in ["rnn", "both"] else False
-        self.rnn = RNNEncoder(
-            in_channels=hidden_channels,
-            out_channels=hidden_channels,
-            rnn_type=rnn_type,
-            num_layers=rnn_num_layers,
-            activation=rnn_activation,
-            bidir=rnn_bidir,
-            dropout=rnn_dropout,
-            apply_mask=apply_mask)
+        self.rnn = settings.rnnen_settings.build_layer()
+        self.att = settings.att_settings.build_layer()
+        self.head = settings.head_settings.build_layer()
 
-        if attention_type != "none":
-            if rnn_bidir:
-                self.att = TemporalAttention(hidden_channels * 2, attention_type,
-                    post_scale=attention_post_scale)
-            else:
-                self.att = TemporalAttention(hidden_channels, attention_type,
-                    post_scale=attention_post_scale)
-        else:
-            self.att = Identity()
         self.attw = None
-
-        if rnn_bidir:
-            self.head = GPoolRecognitionHead(hidden_channels * 2, out_channels)
-        else:
-            self.head = GPoolRecognitionHead(hidden_channels, out_channels)
-
-        self.masking_type = masking_type
-        self.head_type = head_type
+        self.masking_type = settings.masking_type
+        self.head_type = settings.head_type
 
     def forward(self, feature, feature_pad_mask=None):
         # Feature extraction.
@@ -230,7 +263,7 @@ class BahdanauAttentionEnergy(nn.Module):
         return energy
 
 
-class LuongDotAttention(nn.Module):
+class LuongDotAttentionEnergy(nn.Module):
     def __init__(self):
         super().__init__()
 
@@ -245,7 +278,7 @@ class LuongDotAttention(nn.Module):
         return energy
 
 
-class LuongGeneralAttention(nn.Module):
+class LuongGeneralAttentionEnergy(nn.Module):
     def __init__(self,
                  key_dim,
                  query_dim,
@@ -265,29 +298,38 @@ class LuongGeneralAttention(nn.Module):
         return energy
 
 
+class SingleHeadAttentionSettings(ConfiguredModel):
+    key_dim: int = 64
+    query_dim: int = 64
+    att_dim: int = 64
+    add_bias: bool = True
+    att_type: str = Field(default="bahdanau",
+        pattern=r"bahdanau|luong_dot|luong_general")
+
+    def build_layer(self):
+        return SingleHeadAttention(self)
+
+
 class SingleHeadAttention(nn.Module):
     def __init__(self,
-                 key_dim,
-                 query_dim,
-                 att_dim,
-                 add_bias,
-                 att_type):
+                 settings):
         super().__init__()
-        assert att_type in ["bahdanau", "luong_dot", "luong_general"]
+        assert isinstance(settings, SingleHeadAttentionSettings)
+        self.settings = settings
 
-        if att_type == "bahdanau":
+        if settings.att_type == "bahdanau":
             self.att_energy = BahdanauAttentionEnergy(
-                key_dim=key_dim,
-                query_dim=query_dim,
-                att_dim=att_dim,
-                add_bias=add_bias)
-        elif att_type == "luong_dot":
-            self.att_energy = LuongDotAttention()
-        elif att_type == "luong_general":
-            self.att_energy = LuongGeneralAttention(
-                key_dim=key_dim,
-                query_dim=query_dim,
-                add_bias=add_bias)
+                key_dim=settings.key_dim,
+                query_dim=settings.query_dim,
+                att_dim=settings.att_dim,
+                add_bias=settings.add_bias)
+        elif settings.att_type == "luong_dot":
+            self.att_energy = LuongDotAttentionEnergy()
+        elif settings.att_type == "luong_general":
+            self.att_energy = LuongGeneralAttentionEnergy(
+                key_dim=settings.key_dim,
+                query_dim=settings.query_dim,
+                add_bias=settings.add_bias)
 
         self.neg_inf = None
 
@@ -322,73 +364,80 @@ class SingleHeadAttention(nn.Module):
         return cvec, attw
 
 
+class RNNDecoderSettings(ConfiguredModel):
+    dec_type: str = Field(default="bahdanau", pattern=r"bahdanau|luong")
+    in_channels: int = 64
+    hidden_channels: int = 64
+    out_channels: int = 64
+
+    # nn.Embedding
+    num_embeddings: int = 64
+    emb_channels: int = 4
+    padding_idx: int = 0
+
+    rnn_settings: RNNSettings = Field(default_factory=lambda: RNNSettings())
+    att_settings: SingleHeadAttentionSettings = Field(
+        default_factory=lambda: SingleHeadAttentionSettings())
+
+    def model_post_init(self, __context):
+        # Adjust emb_settings.
+        self.num_embeddings = self.out_channels
+
+        # Adjust att_settings.
+        self.att_settings.key_dim = self.in_channels
+        self.att_settings.query_dim = self.hidden_channels
+
+        # Adjust rnn_settings.
+        if self.dec_type == "bahdanau":
+            self.rnn_settings.in_channels = self.in_channels + self.emb_channels
+        elif self.dec_type == "luong":
+            self.rnn_settings.in_channels = self.emb_channels
+
+        self.rnn_settings.out_channels = self.hidden_channels
+        # Force unidirection.
+        self.rnn_settings.bidir = False
+
+        # Propagate.
+        self.rnn_settings.model_post_init(__context)
+        self.att_settings.model_post_init(__context)
+
+    def build_layer(self):
+        if self.dec_type == "bahdanau":
+            decoder = BahdanauRNNDecoder(self)
+        elif self.dec_type == "luong":
+            decoder = LuongRNNDecoder(self)
+        return decoder
+
+
 class BahdanauRNNDecoder(nn.Module):
     def __init__(self,
-                 in_channels,
-                 hidden_channels,
-                 out_channels,
-                 emb_channels,
-                 att_type,
-                 att_dim,
-                 att_add_bias,
-                 rnn_type,
-                 num_layers,
-                 activation,
-                 dropout,
-                 padding_val,
-                 proj_size=0):
+                 settings):
         super().__init__()
-        assert rnn_type in ["srnn", "lstm", "gru"]
+        assert isinstance(settings, RNNDecoderSettings)
+        self.settings = settings
 
         self.emb_layer = nn.Embedding(
-            num_embeddings=out_channels,
-            embedding_dim=emb_channels,
-            padding_idx=padding_val)
+            num_embeddings=settings.num_embeddings,
+            embedding_dim=settings.emb_channels,
+            padding_idx=settings.padding_idx)
 
-        self.att_layer = SingleHeadAttention(
-            key_dim=in_channels,
-            query_dim=hidden_channels,
-            att_dim=att_dim,
-            add_bias=att_add_bias,
-            att_type=att_type)
+        self.att_layer = settings.att_settings.build_layer()
+        self.rnn = settings.rnn_settings.build_layer()
 
-        if rnn_type == "srnn":
-            self.rnn = nn.RNN(input_size=in_channels + emb_channels,
-                              hidden_size=hidden_channels,
-                              num_layers=num_layers,
-                              nonlinearity=activation,
-                              batch_first=True,
-                              dropout=dropout,
-                              bidirectional=False)
-        elif rnn_type == "lstm":
-            self.rnn = nn.LSTM(input_size=in_channels + emb_channels,
-                               hidden_size=hidden_channels,
-                               num_layers=num_layers,
-                               batch_first=True,
-                               dropout=dropout,
-                               bidirectional=False,
-                               proj_size=proj_size)
-        elif rnn_type == "gru":
-            self.rnn = nn.GRU(input_size=in_channels + emb_channels,
-                              hidden_size=hidden_channels,
-                              num_layers=num_layers,
-                              batch_first=True,
-                              dropout=dropout,
-                              bidirectional=False)
-        self.head = nn.Linear(hidden_channels, out_channels)
+        self.head = nn.Linear(settings.hidden_channels, settings.out_channels)
 
-        self.num_layers = num_layers
+        self.num_layers = settings.rnn_settings.num_layers
         self.dec_hstate = None
         self.attw = None
 
-        self.reset_parameters(emb_channels, padding_val)
+        self.reset_parameters(settings.emb_channels, settings.padding_idx)
 
-    def reset_parameters(self, embedding_dim, padding_val):
+    def reset_parameters(self, embedding_dim, padding_idx):
         # Bellow initialization has strong effect to performance.
         # Please refer.
         # https://github.com/facebookresearch/fairseq/blob/main/fairseq/models/transformer/transformer_base.py#L189
         nn.init.normal_(self.emb_layer.weight, mean=0, std=embedding_dim**-0.5)
-        nn.init.constant_(self.emb_layer.weight[padding_val], 0)
+        nn.init.constant_(self.emb_layer.weight[padding_idx], 0)
 
         # Please refer.
         # https://github.com/facebookresearch/fairseq/blob/main/fairseq/models/transformer/transformer_decoder.py
@@ -439,74 +488,34 @@ class BahdanauRNNDecoder(nn.Module):
 
 class LuongRNNDecoder(nn.Module):
     def __init__(self,
-                 in_channels,
-                 hidden_channels,
-                 out_channels,
-                 emb_channels,
-                 att_type,
-                 att_dim,
-                 att_add_bias,
-                 rnn_type,
-                 num_layers,
-                 activation,
-                 dropout,
-                 padding_val,
-                 proj_size=0):
+                 settings):
         super().__init__()
-        assert rnn_type in ["srnn", "lstm", "gru"]
+        assert isinstance(settings, RNNDecoderSettings)
+        self.settings = settings
 
         self.emb_layer = nn.Embedding(
-            num_embeddings=out_channels,
-            embedding_dim=emb_channels,
-            padding_idx=padding_val)
-        self.vocab_size = out_channels
+            num_embeddings=settings.num_embeddings,
+            embedding_dim=settings.emb_channels,
+            padding_idx=settings.padding_idx)
 
-        if rnn_type == "srnn":
-            self.rnn = nn.RNN(input_size=emb_channels,
-                              hidden_size=hidden_channels,
-                              num_layers=num_layers,
-                              nonlinearity=activation,
-                              batch_first=True,
-                              dropout=dropout,
-                              bidirectional=False)
-        elif rnn_type == "lstm":
-            self.rnn = nn.LSTM(input_size=emb_channels,
-                               hidden_size=hidden_channels,
-                               num_layers=num_layers,
-                               batch_first=True,
-                               dropout=dropout,
-                               bidirectional=False,
-                               proj_size=proj_size)
-        elif rnn_type == "gru":
-            self.rnn = nn.GRU(input_size=emb_channels,
-                              hidden_size=hidden_channels,
-                              num_layers=num_layers,
-                              batch_first=True,
-                              dropout=dropout,
-                              bidirectional=False)
+        self.rnn = settings.rnn_settings.build_layer()
+        self.att_layer = settings.att_settings.build_layer()
 
-        self.att_layer = SingleHeadAttention(
-            key_dim=in_channels,
-            query_dim=hidden_channels,
-            att_dim=att_dim,
-            add_bias=att_add_bias,
-            att_type=att_type)
+        self.head = nn.Linear(settings.hidden_channels * 2,  # hstate + cvec
+                              settings.out_channels)
 
-        self.head = nn.Linear(hidden_channels * 2,  # hstate + cvec
-                              out_channels)
-
-        self.num_layers = num_layers
+        self.num_layers = settings.rnn_settings.num_layers
         self.dec_hstate = None
         self.attw = None
 
-        self.reset_parameters(emb_channels, padding_val)
+        self.reset_parameters(settings.emb_channels, settings.padding_idx)
 
-    def reset_parameters(self, embedding_dim, padding_val):
+    def reset_parameters(self, embedding_dim, padding_idx):
         # Bellow initialization has strong effect to performance.
         # Please refer.
         # https://github.com/facebookresearch/fairseq/blob/main/fairseq/models/transformer/transformer_base.py#L189
         nn.init.normal_(self.emb_layer.weight, mean=0, std=embedding_dim**-0.5)
-        nn.init.constant_(self.emb_layer.weight[padding_val], 0)
+        nn.init.constant_(self.emb_layer.weight[padding_idx], 0)
 
         # Please refer.
         # https://github.com/facebookresearch/fairseq/blob/main/fairseq/models/transformer/transformer_decoder.py
@@ -529,7 +538,7 @@ class LuongRNNDecoder(nn.Module):
         assert self.dec_hstate is not None, f"dec_hstate has not been initialized."
         dec_hstate = self.dec_hstate
 
-        emb_out = self.emb_layer(dec_inputs) * math.sqrt(self.vocab_size)
+        emb_out = self.emb_layer(dec_inputs)
         if isinstance(self.rnn, nn.LSTM):
             hidden_seqs, (last_hstate, last_cstate) = self.rnn(emb_out,
                                                                dec_hstate)
@@ -555,85 +564,51 @@ class LuongRNNDecoder(nn.Module):
         return output_dec
 
 
+class RNNCSLRSettings(ConfiguredModel):
+    in_channels: int = 64
+    enc_hidden_channels: int = 64
+    dec_hidden_channels: int = 64
+    dec_att_channels: int = 64
+    out_channels: int = 64
+
+    rnnen_settings: RNNEncoderSettings = Field(
+        default_factory=lambda: RNNEncoderSettings())
+    rnnde_settings: RNNDecoderSettings = Field(
+        default_factory=lambda: RNNDecoderSettings())
+
+    def model_post_init(self, __context):
+        # Adjust rnnen_settings.
+        self.rnnen_settings.in_channels = self.enc_hidden_channels
+        self.rnnen_settings.out_channels = self.enc_hidden_channels
+        # Adjust rnnde_settings.
+        self.rnnde_settings.out_channels = self.out_channels
+        if self.rnnen_settings.bidir:
+            self.rnnde_settings.in_channels = self.enc_hidden_channels * 2
+            self.rnnde_settings.hidden_channels = self.dec_hidden_channels * 2
+            self.rnnde_settings.att_settings.att_dim = self.dec_att_channels * 2
+
+        # Propagate.
+        self.rnnen_settings.model_post_init(__context)
+        self.rnnde_settings.model_post_init(__context)
+
+    def build_layer(self):
+        return RNNCSLR(self)
+
+
 class RNNCSLR(nn.Module):
     def __init__(self,
-                 enc_in_channels,
-                 enc_hidden_channels,
-                 enc_rnn_type,
-                 enc_num_layers,
-                 enc_activation,
-                 enc_bidir,
-                 enc_dropout,
-                 enc_apply_mask,
-                 enc_proj_size,
-                 dec_type,
-                 dec_in_channels,
-                 dec_hidden_channels,
-                 dec_out_channels,
-                 dec_emb_channels,
-                 dec_att_type,
-                 dec_att_dim,
-                 dec_att_add_bias,
-                 dec_rnn_type,
-                 dec_num_layers,
-                 dec_activation,
-                 dec_dropout,
-                 dec_padding_val,
-                 dec_proj_size):
+                 settings):
         super().__init__()
-        assert dec_type in ["bahdanau", "luong"]
-        self.enc_bidir = enc_bidir
+        assert isinstance(settings, RNNCSLRSettings)
+        self.settings = settings
 
-        self.linear = nn.Linear(enc_in_channels, enc_hidden_channels)
+        self.linear = nn.Linear(settings.in_channels, settings.enc_hidden_channels)
         self.enc_activation = nn.ReLU()
 
-        self.encoder = RNNEncoder(
-            in_channels=enc_hidden_channels,
-            out_channels=enc_hidden_channels,
-            rnn_type=enc_rnn_type,
-            num_layers=enc_num_layers,
-            activation=enc_activation,
-            bidir=enc_bidir,
-            dropout=enc_dropout,
-            apply_mask=enc_apply_mask,
-            proj_size=enc_proj_size)
+        self.encoder = settings.rnnen_settings.build_layer()
+        self.decoder = settings.rnnde_settings.build_layer()
 
-        if enc_bidir:
-            dec_in_channels *= 2
-            dec_hidden_channels *= 2
-            dec_att_dim *= 2
-
-        if dec_type == "bahdanau":
-            self.decoder = BahdanauRNNDecoder(
-                in_channels=dec_in_channels,
-                hidden_channels=dec_hidden_channels,
-                out_channels=dec_out_channels,
-                emb_channels=dec_emb_channels,
-                att_type=dec_att_type,
-                att_dim=dec_att_dim,
-                att_add_bias=dec_att_add_bias,
-                rnn_type=dec_rnn_type,
-                num_layers=dec_num_layers,
-                activation=dec_activation,
-                dropout=dec_dropout,
-                padding_val=dec_padding_val,
-                proj_size=dec_proj_size)
-        elif dec_type == "luong":
-            self.decoder = LuongRNNDecoder(
-                in_channels=dec_in_channels,
-                hidden_channels=dec_hidden_channels,
-                out_channels=dec_out_channels,
-                emb_channels=dec_emb_channels,
-                att_type=dec_att_type,
-                att_dim=dec_att_dim,
-                att_add_bias=dec_att_add_bias,
-                rnn_type=dec_rnn_type,
-                num_layers=dec_num_layers,
-                activation=dec_activation,
-                dropout=dec_dropout,
-                padding_val=dec_padding_val,
-                proj_size=dec_proj_size)
-
+        self.enc_bidir = settings.rnnen_settings.bidir
         self.attws = None
 
     def _apply_encoder(self, feature, feature_pad_mask=None):
@@ -643,10 +618,8 @@ class RNNCSLR(nn.Module):
         feature = feature.permute([0, 2, 1, 3])
         feature = feature.reshape(N, T, -1)
 
-        # print("feature0:", feature.shape)
         feature = self.linear(feature)
         feature = self.enc_activation(feature)
-        # print("feature1:", feature.shape)
 
         # Apply encoder.
         enc_seqs, enc_hstate = self.encoder(feature, feature_pad_mask)[:2]
@@ -667,14 +640,9 @@ class RNNCSLR(nn.Module):
                 feature_pad_mask=None, tokens_pad_mask=None):
         """Forward computation for train.
         """
-        # print("feature:", feature.shape)
-        # print("tokens:", tokens.shape)
-
         enc_seqs, enc_hstate = self._apply_encoder(feature, feature_pad_mask)
 
         # Apply decoder.
-        # print("enc_seqs:", enc_seqs.shape)
-        # print("enc_hstate:", enc_hstate.shape)
         self.decoder.init_dec_hstate(enc_hstate)
         preds = None
         for t_index in range(0, tokens.shape[-1]):

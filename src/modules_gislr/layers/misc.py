@@ -22,9 +22,15 @@ from inspect import signature
 # Third party's modules
 import numpy as np
 
-
 import torch
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field)
+
 from torch import nn
+from torch.nn import functional as F
 
 # Local modules
 
@@ -102,23 +108,40 @@ class Identity(nn.Module):
         return feature
 
 
+class ConfiguredModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class TemporalAttentionSettings(ConfiguredModel):
+    in_channels: int = 64
+    attention_type: str = Field(default="sigmoid", pattern=r"none|sigmoid|softmax")
+    post_scale: bool = False
+
+    def build_layer(self):
+        if self.attention_type == "none":
+            att = Identity()
+        else:
+            att = TemporalAttention(self)
+        return att
+
+
 class TemporalAttention(nn.Module):
     def __init__(self,
-                 in_channels,
-                 attention_type,
-                 post_scale):
+                 settings):
         super().__init__()
-        assert attention_type in ["sigmoid", "softmax"]
-        self.linear = nn.Linear(in_channels, 1)
-        self.attention_type = attention_type
+        assert isinstance(settings, TemporalAttentionSettings)
+        self.settings = settings
 
-        if attention_type == "sigmoid":
+        self.linear = nn.Linear(settings.in_channels, 1)
+        self.attention_type = settings.attention_type
+
+        if settings.attention_type == "sigmoid":
             self.scale_layer = nn.Sigmoid()
-        elif attention_type == "softmax":
+        elif settings.attention_type == "softmax":
             self.scale_layer = nn.Softmax(dim=1)
 
         self.neg_inf = None
-        self.post_scale = post_scale
+        self.post_scale = settings.post_scale
 
     def calc_attw(self, attw, mask):
         # Initialize masking value.
@@ -147,21 +170,28 @@ class TemporalAttention(nn.Module):
         return feature, attw
 
 
+class GPoolRecognitionHeadSettings(ConfiguredModel):
+    in_channels: int = 64
+    out_channels: int = 64
+
+    def build_layer(self):
+        return GPoolRecognitionHead(self)
+
+
 class GPoolRecognitionHead(nn.Module):
     def __init__(self,
-                 in_channels,
-                 out_channels):
+                 settings):
         super().__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels
+        assert isinstance(settings, GPoolRecognitionHeadSettings)
+        self.settings = settings
 
-        self.head = nn.Linear(in_channels, out_channels)
+        self.head = nn.Linear(settings.in_channels, settings.out_channels)
         self._init_weight()
 
     def _init_weight(self):
         nn.init.normal_(self.head.weight,
                         mean=0.,
-                        std=math.sqrt(1. / self.out_channels))
+                        std=math.sqrt(1. / self.settings.out_channels))
 
     def forward(self, feature, feature_pad_mask=None):
         # Averaging over temporal axis.

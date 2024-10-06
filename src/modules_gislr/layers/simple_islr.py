@@ -18,12 +18,15 @@ from __future__ import unicode_literals
 
 
 # Third party's modules
+from pydantic import (
+    Field)
 
 from torch import nn
 
 # Local modules
 from .misc import (
-    GPoolRecognitionHead)
+    ConfiguredModel,
+    GPoolRecognitionHeadSettings)
 
 # Execution settings
 VERSION = u"%(prog)s dev"
@@ -34,13 +37,35 @@ DIR_INPUT = None
 DIR_OUTPUT = None
 
 
-class SimpleISLR(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
+class SimpleISLRSettings(ConfiguredModel):
+    in_channels: int
+    inter_channels: int
+    out_channels: int
+    head_settings: GPoolRecognitionHeadSettings = Field(
+        default_factory=lambda: GPoolRecognitionHeadSettings())
 
-        self.linear = nn.Linear(in_channels, 64)
+    def model_post_init(self, __context):
+        self.head_settings.in_channels = self.inter_channels
+        self.head_settings.out_channels = self.out_channels
+
+        # Propagate.
+        self.head_settings.model_post_init(__context)
+
+    def build_layer(self):
+        return SimpleISLR(self)
+
+
+class SimpleISLR(nn.Module):
+    def __init__(self,
+                 settings):
+        super().__init__()
+        assert isinstance(settings, SimpleISLRSettings)
+        self.settings = settings
+
+        self.linear = nn.Linear(settings.in_channels, settings.inter_channels)
         self.activation = nn.ReLU()
-        self.head = GPoolRecognitionHead(64, out_channels)
+
+        self.head = settings.head_settings.build_layer()
 
     def forward(self, feature):
         # Feature extraction.

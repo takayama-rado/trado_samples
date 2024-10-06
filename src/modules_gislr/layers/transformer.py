@@ -23,11 +23,16 @@ import math
 import numpy as np
 
 import torch
+
+from pydantic import (
+    Field)
+
 from torch import nn
 
 # Local modules
 from .misc import (
-    GPoolRecognitionHead,
+    ConfiguredModel,
+    GPoolRecognitionHeadSettings,
     Identity,
     apply_norm,
     create_norm)
@@ -47,23 +52,35 @@ DIR_INPUT = None
 DIR_OUTPUT = None
 
 
+class PositionalEncodingSettings(ConfiguredModel):
+    dim_model: int = 64
+    dropout: float = 0.1
+    max_len: int = 5000
+
+    def build_layer(self):
+        return PositionalEncoding(self)
+
+
 class PositionalEncoding(nn.Module):
     def __init__(self,
-                 dim_model: int,
-                 dropout: float,
-                 max_len: int = 5000):
+                 settings):
         super().__init__()
-        self.dim_model = dim_model
+        assert isinstance(settings, PositionalEncodingSettings)
+        self.settings = settings
+
+        self.dim_model = settings.dim_model
         # Compute the positional encodings once in log space.
-        pose = torch.zeros(max_len, dim_model, dtype=torch.float32)
-        position = torch.arange(0, max_len, dtype=torch.float32).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, dim_model, 2).float()
-                             * -(math.log(10000.0) / dim_model))
+        pose = torch.zeros(settings.max_len, settings.dim_model,
+            dtype=torch.float32)
+        position = torch.arange(0, settings.max_len,
+            dtype=torch.float32).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, settings.dim_model, 2).float()
+                             * -(math.log(10000.0) / settings.dim_model))
         pose[:, 0::2] = torch.sin(position * div_term)
         pose[:, 1::2] = torch.cos(position * div_term)
         self.register_buffer("pose", pose)
 
-        self.dropout = nn.Dropout(p=dropout)
+        self.dropout = nn.Dropout(p=settings.dropout)
 
     def forward(self,
                 feature):
@@ -72,45 +89,46 @@ class PositionalEncoding(nn.Module):
         return feature
 
 
+class MultiheadAttentionSettings(ConfiguredModel):
+    key_dim: int = 64
+    query_dim: int = 64
+    att_dim: int = 64
+    out_dim: int = 64
+    num_heads: int = 1
+    dropout: float = 0.1
+    add_bias: bool = True
+
+    def build_layer(self):
+        return MultiheadAttention(self)
+
+
 class MultiheadAttention(nn.Module):
-    """Multi-headed attention (MHA) layer.
-
-    # Args:
-      - key_dim: The dimension of key.
-      - query_dim: The dimension of query.
-      - att_dim: The dimension of attention space.
-      - out_dim: The dimension of output.
-      - num_heads: The number of heads.
-      - dropout: The dropout probability for attention weights.
-      - add_bias: If True, use bias term in linear layers.
-    """
     def __init__(self,
-                 key_dim,
-                 query_dim,
-                 att_dim,
-                 out_dim,
-                 num_heads,
-                 dropout,
-                 add_bias):
+                 settings):
         super().__init__()
+        assert isinstance(settings, MultiheadAttentionSettings)
+        self.settings = settings
 
-        assert att_dim % num_heads == 0
-        self.head_dim = att_dim // num_heads
-        self.num_heads = num_heads
+        assert settings.att_dim % settings.num_heads == 0
+        self.head_dim = settings.att_dim // settings.num_heads
+        self.num_heads = settings.num_heads
         self.scale = math.sqrt(self.head_dim)
 
-        self.w_key = nn.Linear(key_dim, att_dim, bias=add_bias)
-        self.w_value = nn.Linear(key_dim, att_dim, bias=add_bias)
-        self.w_query = nn.Linear(query_dim, att_dim, bias=add_bias)
+        self.w_key = nn.Linear(settings.key_dim, settings.att_dim,
+            bias=settings.add_bias)
+        self.w_value = nn.Linear(settings.key_dim, settings.att_dim,
+            bias=settings.add_bias)
+        self.w_query = nn.Linear(settings.query_dim, settings.att_dim,
+            bias=settings.add_bias)
 
-        self.w_out = nn.Linear(att_dim, out_dim, bias=add_bias)
+        self.w_out = nn.Linear(settings.att_dim, settings.out_dim, bias=settings.add_bias)
 
-        self.dropout_attn = nn.Dropout(p=dropout)
+        self.dropout_attn = nn.Dropout(p=settings.dropout)
 
         self.neg_inf = None
 
-        self.qkv_same_dim = key_dim == query_dim
-        self.reset_parameters(add_bias)
+        self.qkv_same_dim = settings.key_dim == settings.query_dim
+        self.reset_parameters(settings.add_bias)
 
     def reset_parameters(self, add_bias):
         """Initialize parameters with Xavier uniform distribution.
@@ -189,21 +207,32 @@ class MultiheadAttention(nn.Module):
         return cvec, attw
 
 
+class PositionwiseFeedForwardSettings(ConfiguredModel):
+    dim_model: int = 64
+    dim_pffn: int = 256
+    dropout: float = 0.1
+    activation: str = Field(default="relu",
+        pattern=r"relu|gelu|swish|silu|mish|geluacc|tanhexp")
+    add_bias: bool = True
+
+    def build_layer(self):
+        return PositionwiseFeedForward(self)
+
+
 class PositionwiseFeedForward(nn.Module):
     def __init__(self,
-                 dim_model,
-                 dim_ffw,
-                 dropout,
-                 activation,
-                 add_bias):
+                 settings):
        super().__init__()
+       assert isinstance(settings, PositionwiseFeedForwardSettings)
 
-       self.w_1 = nn.Linear(dim_model, dim_ffw, bias=add_bias)
-       self.w_2 = nn.Linear(dim_ffw, dim_model, bias=add_bias)
+       self.w_1 = nn.Linear(settings.dim_model, settings.dim_pffn,
+           bias=settings.add_bias)
+       self.w_2 = nn.Linear(settings.dim_pffn, settings.dim_model,
+           bias=settings.add_bias)
 
-       self.dropout = nn.Dropout(p=dropout)
+       self.dropout = nn.Dropout(p=settings.dropout)
 
-       self.activation = select_reluwise_activation(activation)
+       self.activation = select_reluwise_activation(settings.activation)
 
     def forward(self, feature):
         feature = self.w_1(feature)
@@ -213,153 +242,221 @@ class PositionwiseFeedForward(nn.Module):
         return feature
 
 
-class TransformerEncoderLayer(nn.Module):
+class TransformerEncoderLayerSettings(ConfiguredModel):
+    dim_model: int = 64
+    activation: str = Field(default="relu",
+        pattern=r"relu|gelu|swish|silu|mish|geluacc|tanhexp")
+    norm_type_sattn: str = Field(default="layer", pattern=r"layer|batch")
+    norm_type_pffn: str = Field(default="layer", pattern=r"layer|batch")
+    norm_eps: float = 1e-5
+    norm_first: bool = True
+    dropout: float = 0.1
+
+    mhsa_settings: MultiheadAttentionSettings = Field(
+        default_factory=lambda: MultiheadAttentionSettings())
+    pffn_settings: PositionwiseFeedForwardSettings = Field(
+        default_factory=lambda: PositionwiseFeedForwardSettings())
+
+    def model_post_init(self, __context):
+        # Adjust mhsa_settings.
+        self.mhsa_settings.key_dim = self.dim_model
+        self.mhsa_settings.query_dim = self.dim_model
+        self.mhsa_settings.att_dim = self.dim_model
+        self.mhsa_settings.out_dim = self.dim_model
+        # Adjust pffn_settings.
+        self.pffn_settings.dim_model = self.dim_model
+        self.pffn_settings.activation = self.activation
+
+        # Propagate.
+        self.mhsa_settings.model_post_init(__context)
+        self.pffn_settings.model_post_init(__context)
+
+    def build_layer(self):
+        if self.norm_first:
+            layer = PreNormTransformerEncoderLayer(self)
+        else:
+            layer = PostNormTransformerEncoderLayer(self)
+        return layer
+
+
+def create_encoder_mask(src_key_padding_mask,
+                        causal_mask):
+    if src_key_padding_mask is not None:
+        san_mask = make_san_mask(src_key_padding_mask, causal_mask)
+    elif causal_mask is not None:
+        san_mask = causal_mask
+    else:
+        san_mask = None
+    return san_mask
+
+
+class PreNormTransformerEncoderLayer(nn.Module):
+    """Pre-normalization structure.
+
+    For the details, please refer
+    https://arxiv.org/pdf/2002.04745v1.pdf
+    """
     def __init__(self,
-                 dim_model,
-                 num_heads,
-                 dim_ffw,
-                 dropout,
-                 activation,
-                 norm_type_sattn,
-                 norm_type_ffw,
-                 norm_eps,
-                 norm_first,
-                 add_bias):
+                 settings):
         super().__init__()
-
-        self.norm_first = norm_first
+        assert isinstance(settings, TransformerEncoderLayerSettings)
+        assert settings.norm_first is True
+        self.settings = settings
 
         #################################################
-        # MHA.
+        # MHSA.
         #################################################
-        self.self_attn = MultiheadAttention(
-            key_dim=dim_model,
-            query_dim=dim_model,
-            att_dim=dim_model,
-            out_dim=dim_model,
-            num_heads=num_heads,
-            dropout=dropout,
-            add_bias=add_bias)
-        self.norm_sattn = create_norm(norm_type_sattn, dim_model, norm_eps, add_bias)
+        self.norm_sattn = create_norm(
+            settings.norm_type_sattn, settings.dim_model, settings.norm_eps,
+            settings.mhsa_settings.add_bias)
+        self.self_attn = settings.mhsa_settings.build_layer()
 
         #################################################
         # PFFN.
         #################################################
-        self.ffw = PositionwiseFeedForward(
-            dim_model=dim_model,
-            dim_ffw=dim_ffw,
-            dropout=dropout,
-            activation=activation,
-            add_bias=add_bias)
-        self.norm_ffw = create_norm(norm_type_ffw, dim_model, norm_eps, add_bias)
+        self.norm_pffn = create_norm(settings.norm_type_pffn, settings.dim_model,
+            settings.norm_eps, settings.pffn_settings.add_bias)
+        self.pffn = settings.pffn_settings.build_layer()
 
-        self.dropout = nn.Dropout(p=dropout)
+        self.dropout = nn.Dropout(p=settings.dropout)
 
         # To store attention weights.
         self.attw = None
-
-    def _forward_prenorm(self,
-                         feature,
-                         san_mask):
-        """Pre-normalization structure.
-
-        For the details, please refer
-        https://arxiv.org/pdf/2002.04745v1.pdf
-        """
-        #################################################
-        # self-attention
-        #################################################
-        # `[N, qlen, dim_model]`
-        residual = feature
-        feature = apply_norm(self.norm_sattn, feature)
-        feature, self.attw = self.self_attn(
-            key=feature,
-            value=feature,
-            query=feature,
-            mask=san_mask)
-        feature = self.dropout(feature) + residual
-
-        #################################################
-        # FFW
-        #################################################
-        residual = feature
-        # `[N, qlen, dim_model]`
-        feature = apply_norm(self.norm_ffw, feature)
-        feature = self.ffw(feature)
-        feature = self.dropout(feature) + residual
-        return feature
-
-    def _forward_postnorm(self,
-                          feature,
-                          san_mask):
-        """Post-normalization structure (standard).
-
-        """
-        #################################################
-        # self-attention
-        #################################################
-        # `[N, qlen, dim_model]`
-        residual = feature
-        feature, self.attw = self.self_attn(
-            key=feature,
-            value=feature,
-            query=feature,
-            mask=san_mask)
-        feature = self.dropout(feature) + residual
-        feature = apply_norm(self.norm_sattn, feature)
-
-        #################################################
-        # FFW
-        #################################################
-        residual = feature
-        # `[N, qlen, dim_model]`
-        feature = self.ffw(feature)
-        feature = self.dropout(feature) + residual
-        feature = apply_norm(self.norm_ffw, feature)
-        return feature
 
     def forward(self,
                 feature,
                 causal_mask=None,
                 src_key_padding_mask=None):
         bsize, qlen = feature.shape[:2]
-        if src_key_padding_mask is not None:
-            san_mask = make_san_mask(src_key_padding_mask, causal_mask)
-        elif causal_mask is not None:
-            san_mask = causal_mask
-        else:
-            san_mask = None
+        san_mask = create_encoder_mask(src_key_padding_mask, causal_mask)
 
-        if self.norm_first:
-            feature = self._forward_prenorm(feature, san_mask)
-        else:
-            feature = self._forward_postnorm(feature, san_mask)
+        #################################################
+        # MHSA
+        #################################################
+        # `[N, qlen, dim_model]`
+        residual = feature
+        feature = apply_norm(self.norm_sattn, feature)
+        feature, self.attw = self.self_attn(
+            key=feature,
+            value=feature,
+            query=feature,
+            mask=san_mask)
+        feature = self.dropout(feature) + residual
+
+        #################################################
+        # PFFN
+        #################################################
+        residual = feature
+        # `[N, qlen, dim_model]`
+        feature = apply_norm(self.norm_pffn, feature)
+        feature = self.pffn(feature)
+        feature = self.dropout(feature) + residual
 
         return feature
 
 
+class PostNormTransformerEncoderLayer(nn.Module):
+    """Post-normalization structure (Standard).
+
+    For the details, please refer
+    https://arxiv.org/pdf/2002.04745v1.pdf
+    """
+    def __init__(self,
+                 settings):
+        super().__init__()
+        assert isinstance(settings, TransformerEncoderLayerSettings)
+        assert settings.norm_first is False
+        self.settings = settings
+
+        #################################################
+        # MHSA.
+        #################################################
+        self.self_attn = settings.mhsa_settings.build_layer()
+        self.norm_sattn = create_norm(
+            settings.norm_type_sattn, settings.dim_model, settings.norm_eps,
+            settings.mhsa_settings.add_bias)
+
+        #################################################
+        # PFFN.
+        #################################################
+        self.pffn = settings.pffn_settings.build_layer()
+        self.norm_pffn = create_norm(settings.norm_type_pffn, settings.dim_model,
+            settings.norm_eps, settings.pffn_settings.add_bias)
+
+        self.dropout = nn.Dropout(p=settings.dropout)
+
+        # To store attention weights.
+        self.attw = None
+
+    def forward(self,
+                feature,
+                causal_mask=None,
+                src_key_padding_mask=None):
+        bsize, qlen = feature.shape[:2]
+        san_mask = create_encoder_mask(src_key_padding_mask, causal_mask)
+
+        #################################################
+        # MHSA
+        #################################################
+        # `[N, qlen, dim_model]`
+        residual = feature
+        feature, self.attw = self.self_attn(
+            key=feature,
+            value=feature,
+            query=feature,
+            mask=san_mask)
+        feature = self.dropout(feature) + residual
+        feature = apply_norm(self.norm_sattn, feature)
+
+        #################################################
+        # PFFN
+        #################################################
+        residual = feature
+        # `[N, qlen, dim_model]`
+        feature = self.pffn(feature)
+        feature = self.dropout(feature) + residual
+        feature = apply_norm(self.norm_pffn, feature)
+
+        return feature
+
+
+class TransformerEncoderSettings(ConfiguredModel):
+    num_layers: int = 1
+    norm_type_tail: str = Field(default="layer", pattern=r"layer|batch")
+    norm_eps: float = 1e-5
+    add_bias: bool = True
+    add_tailnorm: bool = True
+
+    pe_settings: PositionalEncodingSettings = Field(
+        default_factory=lambda: PositionalEncodingSettings())
+
+    def build_layer(self, encoder_layer):
+        return TransformerEncoder(self, encoder_layer)
+
+
 class TransformerEncoder(nn.Module):
     def __init__(self,
-                 encoder_layer,
-                 num_layers,
-                 dim_model,
-                 dropout_pe,
-                 norm_type_tail,
-                 norm_eps,
-                 norm_first,
-                 add_bias,
-                 add_tailnorm):
+                 settings,
+                 encoder_layer):
         super().__init__()
+        assert isinstance(settings, TransformerEncoderSettings)
+        dim_model = settings.pe_settings.dim_model
+        assert dim_model == encoder_layer.settings.dim_model
+        self.settings = settings
 
-        self.pos_encoder = PositionalEncoding(dim_model, dropout_pe)
-        self.layers = nn.ModuleList([copy.deepcopy(encoder_layer) for _ in range(num_layers)])
+        self.pos_encoder = settings.pe_settings.build_layer()
+        self.layers = nn.ModuleList([copy.deepcopy(encoder_layer) for _
+            in range(settings.num_layers)])
 
         # Add LayerNorm at tail position.
-        # This is applied only when norm_first is True because
+        # This is applied only for pre-normalization structure because
         # post-normalization structure includes tail-normalization in encoder
         # layers.
-        if add_tailnorm and norm_first:
-            self.norm_tail = create_norm(norm_type_tail, dim_model, norm_eps, add_bias)
+        add_tailnorm0 = settings.add_tailnorm
+        add_tailnorm1 = not isinstance(encoder_layer, PostNormTransformerEncoderLayer)
+        if add_tailnorm0 and add_tailnorm1:
+            self.norm_tail = create_norm(settings.norm_type_tail, dim_model,
+                settings.norm_eps, settings.add_bias)
         else:
             self.norm_tail = Identity()
 
@@ -376,68 +473,74 @@ class TransformerEncoder(nn.Module):
         return feature
 
 
+class TransformerEnISLRSettings(ConfiguredModel):
+    in_channels: int = 64
+    inter_channels: int = 64
+    out_channels: int = 64
+    activation: str = Field(default="relu",
+        pattern=r"relu|gelu|swish|silu|mish|geluacc|tanhexp")
+    pooling_type: str = Field(default="none", pattern=r"none|average|max")
+
+    enlayer_settings: TransformerEncoderLayerSettings = Field(
+        default_factory=lambda: TransformerEncoderLayerSettings())
+    encoder_settings: TransformerEncoderSettings = Field(
+        default_factory=lambda: TransformerEncoderSettings())
+
+    head_settings: GPoolRecognitionHeadSettings = Field(
+        default_factory=lambda: GPoolRecognitionHeadSettings())
+
+    def model_post_init(self, __context):
+        # Adjust enlayer_settings.
+        self.enlayer_settings.dim_model = self.inter_channels
+        self.enlayer_settings.activation = self.activation
+
+        # Adjust head_settings.
+        self.head_settings.in_channels = self.inter_channels
+        self.head_settings.out_channels = self.out_channels
+
+        # Propagate.
+        self.enlayer_settings.model_post_init(__context)
+        self.encoder_settings.model_post_init(__context)
+        self.head_settings.model_post_init(__context)
+
+    def build_layer(self):
+        return TransformerEnISLR(self)
+
+
+def build_pooling_layer(pooling_type):
+    if pooling_type == "none":
+        pooling = Identity()
+    elif pooling_type == "average":
+        pooling = nn.AvgPool2d(
+            kernel_size=[2, 1],
+            stride=[2, 1],
+            padding=0)
+    elif pooling_type == "max":
+        pooling = nn.MaxPool2d(
+            kernel_size=[2, 1],
+            stride=[2, 1],
+            padding=0)
+    return pooling
+
+
 class TransformerEnISLR(nn.Module):
     def __init__(self,
-                 in_channels,
-                 inter_channels,
-                 out_channels,
-                 activation="relu",
-                 pooling_type="none",
-                 tren_num_layers=1,
-                 tren_num_heads=1,
-                 tren_dim_ffw=256,
-                 tren_dropout_pe=0.1,
-                 tren_dropout=0.1,
-                 tren_norm_type_sattn="layer",
-                 tren_norm_type_ffw="layer",
-                 tren_norm_type_tail="layer",
-                 tren_norm_eps=1e-5,
-                 tren_norm_first=True,
-                 tren_add_bias=True,
-                 tren_add_tailnorm=True):
+                 settings):
         super().__init__()
+        assert isinstance(settings, TransformerEnISLRSettings)
+        self.settings = settings
 
         # Feature extraction.
-        self.linear = nn.Linear(in_channels, inter_channels)
-        self.activation = select_reluwise_activation(activation)
+        self.linear = nn.Linear(settings.in_channels, settings.inter_channels)
+        self.activation = select_reluwise_activation(settings.activation)
 
-        if pooling_type == "none":
-            self.pooling = Identity()
-        elif pooling_type == "average":
-            self.pooling = nn.AvgPool2d(
-                kernel_size=[2, 1],
-                stride=[2, 1],
-                padding=0)
-        elif pooling_type == "max":
-            self.pooling = nn.MaxPool2d(
-                kernel_size=[2, 1],
-                stride=[2, 1],
-                padding=0)
+        self.pooling = build_pooling_layer(settings.pooling_type)
 
         # Transformer-Encoder.
-        enlayer = TransformerEncoderLayer(
-            dim_model=inter_channels,
-            num_heads=tren_num_heads,
-            dim_ffw=tren_dim_ffw,
-            dropout=tren_dropout,
-            activation=activation,
-            norm_type_sattn=tren_norm_type_sattn,
-            norm_type_ffw=tren_norm_type_ffw,
-            norm_eps=tren_norm_eps,
-            norm_first=tren_norm_first,
-            add_bias=tren_add_bias)
-        self.tr_encoder = TransformerEncoder(
-            encoder_layer=enlayer,
-            num_layers=tren_num_layers,
-            dim_model=inter_channels,
-            dropout_pe=tren_dropout_pe,
-            norm_type_tail=tren_norm_type_tail,
-            norm_eps=tren_norm_eps,
-            norm_first=tren_norm_first,
-            add_bias=tren_add_bias,
-            add_tailnorm=tren_add_tailnorm)
+        enlayer = settings.enlayer_settings.build_layer()
+        self.tr_encoder = settings.encoder_settings.build_layer(enlayer)
 
-        self.head = GPoolRecognitionHead(inter_channels, out_channels)
+        self.head = settings.head_settings.build_layer()
 
     def forward(self,
                 feature,
@@ -482,150 +585,113 @@ class TransformerEnISLR(nn.Module):
         return logit
 
 
-class TransformerDecoderLayer(nn.Module):
-    def __init__(self,
-                 dim_model,
-                 num_heads,
-                 dim_ffw,
-                 dropout,
-                 activation,
-                 norm_type_sattn,
-                 norm_type_cattn,
-                 norm_type_ffw,
-                 norm_eps,
-                 norm_first,
-                 add_bias):
-        super().__init__()
+class TransformerDecoderLayerSettings(ConfiguredModel):
+    dim_model: int = 64
+    activation: str = Field(default="relu",
+        pattern=r"relu|gelu|swish|silu|mish|geluacc|tanhexp")
+    norm_type_sattn: str = Field(default="layer", pattern=r"layer|batch")
+    norm_type_cattn: str = Field(default="layer", pattern=r"layer|batch")
+    norm_type_pffn: str = Field(default="layer", pattern=r"layer|batch")
+    norm_eps: float = 1e-5
+    norm_first: bool = True
+    dropout: float = 0.1
 
-        self.norm_first = norm_first
+    mhsa_settings: MultiheadAttentionSettings = Field(
+        default_factory=lambda: MultiheadAttentionSettings())
+    mhca_settings: MultiheadAttentionSettings = Field(
+        default_factory=lambda: MultiheadAttentionSettings())
+    pffn_settings: PositionwiseFeedForwardSettings = Field(
+        default_factory=lambda: PositionwiseFeedForwardSettings())
+
+    def model_post_init(self, __context):
+        # Adjust mhsa_settings.
+        self.mhsa_settings.key_dim = self.dim_model
+        self.mhsa_settings.query_dim = self.dim_model
+        self.mhsa_settings.att_dim = self.dim_model
+        self.mhsa_settings.out_dim = self.dim_model
+        # Adjust mhca_settings.
+        self.mhca_settings.key_dim = self.dim_model
+        self.mhca_settings.query_dim = self.dim_model
+        self.mhca_settings.att_dim = self.dim_model
+        self.mhca_settings.out_dim = self.dim_model
+        # Adjust pffn_settings.
+        self.pffn_settings.dim_model = self.dim_model
+        self.pffn_settings.activation = self.activation
+
+        # Propagate.
+        self.mhsa_settings.model_post_init(__context)
+        self.mhca_settings.model_post_init(__context)
+        self.pffn_settings.model_post_init(__context)
+
+    def build_layer(self):
+        if self.norm_first:
+            layer = PreNormTransformerDecoderLayer(self)
+        else:
+            layer = PostNormTransformerDecoderLayer(self)
+        return layer
+
+
+def create_decoder_mask(tgt_feature, enc_feature,
+                        tgt_key_padding_mask, tgt_causal_mask,
+                        enc_key_padding_mask, enc_tgt_causal_mask):
+    if tgt_key_padding_mask is None:
+        tgt_key_padding_mask = torch.ones(tgt_feature.shape[:2],
+                                          dtype=enc_feature.dtype,
+                                          device=enc_feature.device)
+    tgt_san_mask = make_san_mask(tgt_key_padding_mask, tgt_causal_mask)
+    if enc_key_padding_mask is None:
+        enc_key_padding_mask = torch.ones(enc_feature.shape[:2],
+                                          dtype=enc_feature.dtype,
+                                          device=enc_feature.device)
+    enc_tgt_mask = enc_key_padding_mask.unsqueeze(1).repeat(
+        [1, tgt_feature.shape[1], 1])
+    if enc_tgt_causal_mask is not None:
+        enc_tgt_mask = enc_tgt_mask & enc_tgt_causal_mask
+    return tgt_san_mask, enc_tgt_mask
+
+
+class PreNormTransformerDecoderLayer(nn.Module):
+    """Pre-normalization structure.
+
+    For the details, please refer
+    https://arxiv.org/pdf/2002.04745v1.pdf
+    """
+    def __init__(self,
+                 settings):
+        super().__init__()
+        assert isinstance(settings, TransformerDecoderLayerSettings)
+        assert settings.norm_first is True
+        self.settings = settings
 
         #################################################
         # MHSA.
         #################################################
-        self.self_attn = MultiheadAttention(
-            key_dim=dim_model,
-            query_dim=dim_model,
-            att_dim=dim_model,
-            out_dim=dim_model,
-            num_heads=num_heads,
-            dropout=dropout,
-            add_bias=add_bias)
-        self.norm_sattn = create_norm(norm_type_sattn, dim_model, norm_eps, add_bias)
+        self.norm_sattn = create_norm(
+            settings.norm_type_sattn, settings.dim_model, settings.norm_eps,
+            settings.mhsa_settings.add_bias)
+        self.self_attn = settings.mhsa_settings.build_layer()
 
         #################################################
         # MHCA.
         #################################################
-        self.cross_attn = MultiheadAttention(
-            key_dim=dim_model,
-            query_dim=dim_model,
-            att_dim=dim_model,
-            out_dim=dim_model,
-            num_heads=num_heads,
-            dropout=dropout,
-            add_bias=add_bias)
-        self.norm_cattn = create_norm(norm_type_cattn, dim_model, norm_eps, add_bias)
+        self.norm_cattn = create_norm(
+            settings.norm_type_cattn, settings.dim_model, settings.norm_eps,
+            settings.mhca_settings.add_bias)
+        self.cross_attn = settings.mhca_settings.build_layer()
 
         #################################################
         # PFFN.
         #################################################
-        self.ffw = PositionwiseFeedForward(
-            dim_model=dim_model,
-            dim_ffw=dim_ffw,
-            dropout=dropout,
-            activation=activation,
-            add_bias=add_bias)
-        self.norm_ffw = create_norm(norm_type_ffw, dim_model, norm_eps, add_bias)
+        self.norm_pffn = create_norm(
+            settings.norm_type_pffn, settings.dim_model, settings.norm_eps,
+            settings.pffn_settings.add_bias)
+        self.pffn = settings.pffn_settings.build_layer()
 
-        self.dropout = nn.Dropout(p=dropout)
+        self.dropout = nn.Dropout(p=settings.dropout)
 
         # To store attention weights.
         self.sattw = None
         self.cattw = None
-
-    def _forward_prenorm(self,
-                         tgt_feature,
-                         enc_feature,
-                         tgt_san_mask,
-                         enc_tgt_mask):
-        """Pre-normalization structure.
-
-        For the details, please refer
-        https://arxiv.org/pdf/2002.04745v1.pdf
-        """
-        #################################################
-        # self-attention
-        #################################################
-        residual = tgt_feature
-        tgt_feature = apply_norm(self.norm_sattn, tgt_feature)
-        tgt_feature, self.sattw = self.self_attn(
-            key=tgt_feature,
-            value=tgt_feature,
-            query=tgt_feature,
-            mask=tgt_san_mask)
-        tgt_feature = self.dropout(tgt_feature) + residual
-
-        #################################################
-        # cross-attention
-        #################################################
-        residual = tgt_feature
-        tgt_feature = apply_norm(self.norm_cattn, tgt_feature)
-        tgt_feature, self.cattw = self.cross_attn(
-            key=enc_feature,
-            value=enc_feature,
-            query=tgt_feature,
-            mask=enc_tgt_mask)
-        tgt_feature = self.dropout(tgt_feature) + residual
-
-        #################################################
-        # FFW
-        #################################################
-        residual = tgt_feature
-        tgt_feature = apply_norm(self.norm_ffw, tgt_feature)
-        tgt_feature = self.ffw(tgt_feature)
-        tgt_feature = self.dropout(tgt_feature) + residual
-        return tgt_feature
-
-    def _forward_postnorm(self,
-                          tgt_feature,
-                          enc_feature,
-                          tgt_san_mask,
-                          enc_tgt_mask):
-        """Post-normalization structure (standard).
-
-        """
-        #################################################
-        # self-attention
-        #################################################
-        residual = tgt_feature
-        tgt_feature, self.sattw = self.self_attn(
-            key=tgt_feature,
-            value=tgt_feature,
-            query=tgt_feature,
-            mask=tgt_san_mask)
-        tgt_feature = self.dropout(tgt_feature) + residual
-        tgt_feature = apply_norm(self.norm_sattn, tgt_feature)
-
-        #################################################
-        # cross-attention
-        #################################################
-        residual = tgt_feature
-        tgt_feature, self.cattw = self.cross_attn(
-            key=enc_feature,
-            value=enc_feature,
-            query=tgt_feature,
-            mask=enc_tgt_mask)
-        tgt_feature = self.dropout(tgt_feature) + residual
-        tgt_feature = apply_norm(self.norm_cattn, tgt_feature)
-
-        #################################################
-        # FFW
-        #################################################
-        residual = tgt_feature
-        tgt_feature = self.ffw(tgt_feature)
-        tgt_feature = self.dropout(tgt_feature) + residual
-        tgt_feature = apply_norm(self.norm_ffw, tgt_feature)
-
-        return tgt_feature
 
     def forward(self,
                 tgt_feature,
@@ -636,72 +702,193 @@ class TransformerDecoderLayer(nn.Module):
                 enc_key_padding_mask=None):
 
         # Create mask.
-        if tgt_key_padding_mask is None:
-            tgt_key_padding_mask = torch.ones(tgt_feature.shape[:2],
-                                              dtype=enc_feature.dtype,
-                                              device=enc_feature.device)
-        tgt_san_mask = make_san_mask(tgt_key_padding_mask, tgt_causal_mask)
-        if enc_key_padding_mask is None:
-            enc_key_padding_mask = torch.ones(enc_feature.shape[:2],
-                                              dtype=enc_feature.dtype,
-                                              device=enc_feature.device)
-        enc_tgt_mask = enc_key_padding_mask.unsqueeze(1).repeat(
-            [1, tgt_feature.shape[1], 1])
-        if enc_tgt_causal_mask is not None:
-            enc_tgt_mask = enc_tgt_mask & enc_tgt_causal_mask
+        tgt_san_mask, enc_tgt_mask = create_decoder_mask(
+            tgt_feature, enc_feature,
+            tgt_key_padding_mask, tgt_causal_mask,
+            enc_key_padding_mask, enc_tgt_causal_mask)
 
-        if self.norm_first:
-            tgt_feature = self._forward_prenorm(tgt_feature, enc_feature,
-                                                tgt_san_mask, enc_tgt_mask)
-        else:
-            tgt_feature = self._forward_postnorm(tgt_feature, enc_feature,
-                                                 tgt_san_mask, enc_tgt_mask)
+        #################################################
+        # MHSA
+        #################################################
+        residual = tgt_feature
+        tgt_feature = apply_norm(self.norm_sattn, tgt_feature)
+        tgt_feature, self.sattw = self.self_attn(
+            key=tgt_feature,
+            value=tgt_feature,
+            query=tgt_feature,
+            mask=tgt_san_mask)
+        tgt_feature = self.dropout(tgt_feature) + residual
+
+        #################################################
+        # MHCA
+        #################################################
+        residual = tgt_feature
+        tgt_feature = apply_norm(self.norm_cattn, tgt_feature)
+        tgt_feature, self.cattw = self.cross_attn(
+            key=enc_feature,
+            value=enc_feature,
+            query=tgt_feature,
+            mask=enc_tgt_mask)
+        tgt_feature = self.dropout(tgt_feature) + residual
+
+        #################################################
+        # PFFN
+        #################################################
+        residual = tgt_feature
+        tgt_feature = apply_norm(self.norm_pffn, tgt_feature)
+        tgt_feature = self.pffn(tgt_feature)
+        tgt_feature = self.dropout(tgt_feature) + residual
+        return tgt_feature
+
+
+class PostNormTransformerDecoderLayer(nn.Module):
+    """Post-normalization structure (Standard).
+
+    For the details, please refer
+    https://arxiv.org/pdf/2002.04745v1.pdf
+    """
+    def __init__(self,
+                 settings):
+        super().__init__()
+        assert isinstance(settings, TransformerDecoderLayerSettings)
+        assert settings.norm_first is False
+        self.settings = settings
+
+        #################################################
+        # MHSA.
+        #################################################
+        self.self_attn = settings.mhsa_settings.build_layer()
+        self.norm_sattn = create_norm(
+            settings.norm_type_sattn, settings.dim_model, settings.norm_eps,
+            settings.mhsa_settings.add_bias)
+
+        #################################################
+        # MHCA.
+        #################################################
+        self.cross_attn = settings.mhca_settings.build_layer()
+        self.norm_cattn = create_norm(
+            settings.norm_type_cattn, settings.dim_model, settings.norm_eps,
+            settings.mhca_settings.add_bias)
+
+        #################################################
+        # PFFN.
+        #################################################
+        self.pffn = settings.pffn_settings.build_layer()
+        self.norm_pffn = create_norm(
+            settings.norm_type_pffn, settings.dim_model, settings.norm_eps,
+            settings.pffn_settings.add_bias)
+
+        self.dropout = nn.Dropout(p=settings.dropout)
+
+        # To store attention weights.
+        self.sattw = None
+        self.cattw = None
+
+    def forward(self,
+                tgt_feature,
+                enc_feature,
+                tgt_causal_mask=None,
+                enc_tgt_causal_mask=None,
+                tgt_key_padding_mask=None,
+                enc_key_padding_mask=None):
+
+        # Create mask.
+        tgt_san_mask, enc_tgt_mask = create_decoder_mask(
+            tgt_feature, enc_feature,
+            tgt_key_padding_mask, tgt_causal_mask,
+            enc_key_padding_mask, enc_tgt_causal_mask)
+
+        #################################################
+        # MHSA
+        #################################################
+        residual = tgt_feature
+        tgt_feature, self.sattw = self.self_attn(
+            key=tgt_feature,
+            value=tgt_feature,
+            query=tgt_feature,
+            mask=tgt_san_mask)
+        tgt_feature = self.dropout(tgt_feature) + residual
+        tgt_feature = apply_norm(self.norm_sattn, tgt_feature)
+
+        #################################################
+        # MHCA
+        #################################################
+        residual = tgt_feature
+        tgt_feature, self.cattw = self.cross_attn(
+            key=enc_feature,
+            value=enc_feature,
+            query=tgt_feature,
+            mask=enc_tgt_mask)
+        tgt_feature = self.dropout(tgt_feature) + residual
+        tgt_feature = apply_norm(self.norm_cattn, tgt_feature)
+
+        #################################################
+        # PFFN
+        #################################################
+        residual = tgt_feature
+        tgt_feature = self.pffn(tgt_feature)
+        tgt_feature = self.dropout(tgt_feature) + residual
+        tgt_feature = apply_norm(self.norm_pffn, tgt_feature)
 
         return tgt_feature
 
 
+class TransformerDecoderSettings(ConfiguredModel):
+    out_channels: int = 100
+    num_layers: int = 1
+    norm_type_tail: str = Field(default="layer", pattern=r"layer|batch")
+    norm_eps: float = 1e-5
+    add_bias: bool = True
+    add_tailnorm: bool = True
+    padding_idx: int = 0
+
+    pe_settings: PositionalEncodingSettings = Field(
+        default_factory=lambda: PositionalEncodingSettings())
+
+    def build_layer(self, decoder_layer):
+        return TransformerDecoder(self, decoder_layer)
+
+
 class TransformerDecoder(nn.Module):
     def __init__(self,
-                 decoder_layer,
-                 out_channels,
-                 num_layers,
-                 dim_model,
-                 dropout_pe,
-                 norm_type_tail,
-                 norm_eps,
-                 norm_first,
-                 add_bias,
-                 add_tailnorm,
-                 padding_val):
+                 settings,
+                 decoder_layer):
         super().__init__()
+        assert isinstance(settings, TransformerDecoderSettings)
+        dim_model = settings.pe_settings.dim_model
+        assert dim_model == decoder_layer.settings.dim_model
+        self.settings = settings
 
-        self.emb_layer = nn.Embedding(out_channels,
+        self.emb_layer = nn.Embedding(settings.out_channels,
                                       dim_model,
-                                      padding_idx=padding_val)
-        self.vocab_size = out_channels
+                                      padding_idx=settings.padding_idx)
+        self.vocab_size = settings.out_channels
 
-        self.pos_encoder = PositionalEncoding(dim_model, dropout_pe)
-        self.layers = nn.ModuleList([copy.deepcopy(decoder_layer) for _ in range(num_layers)])
+        self.pos_encoder = settings.pe_settings.build_layer()
+        self.layers = nn.ModuleList([copy.deepcopy(decoder_layer) for _
+            in range(settings.num_layers)])
 
-        # Add LayerNorm at tail position.
-        # This is applied only when norm_first is True because
+        # This is applied only for pre-normalization structure because
         # post-normalization structure includes tail-normalization in encoder
         # layers.
-        if add_tailnorm and norm_first:
-            self.norm_tail = create_norm(norm_type_tail, dim_model, norm_eps, add_bias)
+        add_tailnorm0 = settings.add_tailnorm
+        add_tailnorm1 = not isinstance(decoder_layer, PostNormTransformerDecoderLayer)
+        if add_tailnorm0 and add_tailnorm1:
+            self.norm_tail = create_norm(settings.norm_type_tail, dim_model,
+                settings.norm_eps, settings.add_bias)
         else:
             self.norm_tail = Identity()
 
-        self.head = nn.Linear(dim_model, out_channels)
+        self.head = nn.Linear(dim_model, settings.out_channels)
 
-        self.reset_parameters(dim_model, padding_val)
+        self.reset_parameters(dim_model, settings.padding_idx)
 
-    def reset_parameters(self, embedding_dim, padding_val):
+    def reset_parameters(self, embedding_dim, padding_idx):
         # Bellow initialization has strong effect to performance.
         # Please refer.
         # https://github.com/facebookresearch/fairseq/blob/main/fairseq/models/transformer/transformer_base.py#L189
         nn.init.normal_(self.emb_layer.weight, mean=0, std=embedding_dim**-0.5)
-        nn.init.constant_(self.emb_layer.weight[padding_val], 0)
+        nn.init.constant_(self.emb_layer.weight[padding_idx], 0)
 
         # Please refer.
         # https://github.com/facebookresearch/fairseq/blob/main/fairseq/models/transformer/transformer_decoder.py
@@ -733,92 +920,62 @@ class TransformerDecoder(nn.Module):
         return logit
 
 
+class TransformerCSLRSettings(ConfiguredModel):
+    in_channels: int = 64
+    inter_channels: int = 64
+    out_channels: int = 64
+    activation: str = Field(default="relu",
+        pattern=r"relu|gelu|swish|silu|mish|geluacc|tanhexp")
+    padding_idx: int = 0
+
+    enlayer_settings: TransformerEncoderLayerSettings = Field(
+        default_factory=lambda: TransformerEncoderLayerSettings())
+    encoder_settings: TransformerEncoderSettings = Field(
+        default_factory=lambda: TransformerEncoderSettings())
+
+    delayer_settings: TransformerDecoderLayerSettings = Field(
+        default_factory=lambda: TransformerDecoderLayerSettings())
+    decoder_settings: TransformerDecoderSettings = Field(
+        default_factory=lambda: TransformerDecoderSettings())
+
+    def model_post_init(self, __context):
+        # Adjust enlayer_settings.
+        self.enlayer_settings.dim_model = self.inter_channels
+        self.enlayer_settings.activation = self.activation
+        # Adjust delayer_settings.
+        self.delayer_settings.dim_model = self.inter_channels
+        self.delayer_settings.activation = self.activation
+        # Adjust decoder_settings.
+        self.decoder_settings.padding_idx = self.padding_idx
+
+        # Propagate.
+        self.enlayer_settings.model_post_init(__context)
+        self.encoder_settings.model_post_init(__context)
+        self.delayer_settings.model_post_init(__context)
+        self.decoder_settings.model_post_init(__context)
+
+    def build_layer(self):
+        return TransformerCSLR(self)
+
+
 class TransformerCSLR(nn.Module):
     def __init__(self,
-                 in_channels,
-                 inter_channels,
-                 out_channels,
-                 padding_val,
-                 activation="relu",
-                 tren_num_layers=1,
-                 tren_num_heads=1,
-                 tren_dim_ffw=256,
-                 tren_dropout_pe=0.1,
-                 tren_dropout=0.1,
-                 tren_norm_type_sattn="layer",
-                 tren_norm_type_ffw="layer",
-                 tren_norm_type_tail="layer",
-                 tren_norm_eps=1e-5,
-                 tren_norm_first=True,
-                 tren_add_bias=True,
-                 tren_add_tailnorm=True,
-                 trde_num_layers=1,
-                 trde_num_heads=1,
-                 trde_dim_ffw=256,
-                 trde_dropout_pe=0.1,
-                 trde_dropout=0.1,
-                 trde_norm_type_sattn="layer",
-                 trde_norm_type_cattn="layer",
-                 trde_norm_type_ffw="layer",
-                 trde_norm_type_tail="layer",
-                 trde_norm_eps=1e-5,
-                 trde_norm_first=True,
-                 trde_add_bias=True,
-                 trde_add_tailnorm=True):
+                 settings):
         super().__init__()
+        assert isinstance(settings, TransformerCSLRSettings)
+        self.settings = settings
 
         # Feature extraction.
-        self.linear = nn.Linear(in_channels, inter_channels)
-        self.activation = select_reluwise_activation(activation)
+        self.linear = nn.Linear(settings.in_channels, settings.inter_channels)
+        self.activation = select_reluwise_activation(settings.activation)
 
         # Transformer-Encoder.
-        enlayer = TransformerEncoderLayer(
-            dim_model=inter_channels,
-            num_heads=tren_num_heads,
-            dim_ffw=tren_dim_ffw,
-            dropout=tren_dropout,
-            activation=activation,
-            norm_type_sattn=tren_norm_type_sattn,
-            norm_type_ffw=tren_norm_type_ffw,
-            norm_eps=tren_norm_eps,
-            norm_first=tren_norm_first,
-            add_bias=tren_add_bias)
-        self.tr_encoder = TransformerEncoder(
-            encoder_layer=enlayer,
-            num_layers=tren_num_layers,
-            dim_model=inter_channels,
-            dropout_pe=tren_dropout_pe,
-            norm_type_tail=tren_norm_type_tail,
-            norm_eps=tren_norm_eps,
-            norm_first=tren_norm_first,
-            add_bias=tren_add_bias,
-            add_tailnorm=tren_add_tailnorm)
+        enlayer = settings.enlayer_settings.build_layer()
+        self.tr_encoder = settings.encoder_settings.build_layer(enlayer)
 
         # Transformer-Decoder.
-        delayer = TransformerDecoderLayer(
-            dim_model=inter_channels,
-            num_heads=trde_num_heads,
-            dim_ffw=trde_dim_ffw,
-            dropout=trde_dropout,
-            activation=activation,
-            norm_type_sattn=trde_norm_type_sattn,
-            norm_type_cattn=trde_norm_type_cattn,
-            norm_type_ffw=trde_norm_type_ffw,
-            norm_eps=trde_norm_eps,
-            norm_first=trde_norm_first,
-            add_bias=trde_add_bias)
-        self.tr_decoder = TransformerDecoder(
-            decoder_layer=delayer,
-            out_channels=out_channels,
-            num_layers=trde_num_layers,
-            dim_model=inter_channels,
-            dropout_pe=trde_dropout_pe,
-            norm_type_tail=trde_norm_type_tail,
-            norm_eps=trde_norm_eps,
-            norm_first=trde_norm_first,
-            add_bias=trde_add_bias,
-            add_tailnorm=trde_add_tailnorm,
-            padding_val=padding_val)
+        delayer = settings.delayer_settings.build_layer()
+        self.tr_decoder = settings.decoder_settings.build_layer(delayer)
 
     def forward(self,
                 src_feature,
