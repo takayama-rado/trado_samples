@@ -91,7 +91,7 @@ class Zero(nn.Module):
     def forward(self, feature, *args, **kwargs):
         """Perform forward computation.
         """
-        return 0
+        return torch.zeros([1], dtype=feature.dtype, device=feature.device)
 
 
 class Identity(nn.Module):
