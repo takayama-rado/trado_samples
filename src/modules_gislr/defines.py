@@ -33,22 +33,37 @@ DIR_OUTPUT = None
 
 
 # Extract landmarks.
-USE_LIP = [0, 13, 14, 17, 37, 39, 40, 61, 78, 80,
-           81, 82, 84, 87, 88, 91, 95, 146, 178, 181,
-           185, 191, 267, 269, 270, 291, 308, 310, 311, 312,
-           314, 317, 318, 321, 324, 375, 402, 405, 409, 415]
-USE_NOSE = [1, 2, 98, 327]
+USE_LIP = [
+    61, 185, 40, 39, 37, 0, 267, 269, 270, 409,
+    291, 375, 321, 405, 314, 17, 84, 181, 91, 146,
+    78, 191, 80, 81, 82, 13, 312, 311, 310, 415,
+    308, 324, 318, 402, 317, 14, 87, 178, 88, 95]
+USE_NOSE = [98, 1, 327, 2]
 USE_REYE = [33, 7, 163, 144, 145, 153, 154, 155, 133,
             246, 161, 160, 159, 158, 157, 173]
 USE_LEYE = [263, 249, 390, 373, 374, 380, 381, 382, 362,
             466, 388, 387, 386, 385, 384, 398]
-USE_FACE = np.sort(np.unique(USE_LIP + USE_NOSE + USE_REYE + USE_LEYE))
+USE_FACE = USE_LIP + USE_NOSE + USE_REYE + USE_LEYE
 
 USE_LHAND = np.arange(468, 468+21)
 # Use hands only.
 USE_POSE = np.array([11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]) + 468 + 21
 # USE_POSE = np.array([15, 16, 17, 18, 19, 20, 21, 22]) + 468 + 21
 USE_RHAND = np.arange(468+21+33, 468+21+33+21)
+
+# Compact1.
+# USE_LIP_COMPACT1 = [
+#     0, 17, 37, 39, 40, 61, 84, 91, 146, 181, 185,
+#     267, 269, 270, 291, 314, 321, 375, 405, 409]
+USE_LIP_COMPACT1 = [61, 0, 291, 17]
+
+USE_NOSE_COMPACT1 = USE_NOSE
+
+USE_REYE_COMPACT1 = [33, 159, 133, 145]
+
+USE_LEYE_COMPACT1 = [362, 286, 263, 374]
+
+USE_FACE_COMPACT1 = USE_LIP_COMPACT1 + USE_NOSE_COMPACT1 + USE_REYE_COMPACT1 + USE_LEYE_COMPACT1
 
 # We do not use face.
 # USE_LANDMARKS = np.concatenate([USE_FACE, USE_LHAND, USE_POSE, USE_RHAND])
@@ -61,8 +76,11 @@ USE_RHAND = np.arange(468+21+33, 468+21+33+21)
 # USE_LANDMARKS_WO_RHAND = np.array([pt for pt in USE_LANDMARKS_FILTERED if pt not in WO_RHAND])
 
 
-def get_fullbody_landmarks():
-    use_landmarks = np.concatenate([USE_FACE, USE_LHAND, USE_POSE, USE_RHAND])
+def get_fullbody_landmarks(use_compact_face=False, sort_face=True):
+    face = USE_FACE_COMPACT1 if use_compact_face else USE_FACE
+    face = np.sort(face) if sort_face else face
+
+    use_landmarks = np.concatenate([face, USE_LHAND, USE_POSE, USE_RHAND])
     use_landmarks_filtered = np.arange(len(use_landmarks))
     return use_landmarks_filtered, use_landmarks
 
@@ -136,10 +154,13 @@ SWAPPAIR_HANDS = np.array([[pl, pr] for pl, pr in zip(USE_LHAND, USE_RHAND)])
 # SWAPPAIR_ALL_FILTERED = np.concatenate([np.where(pt==USE_LANDMARKS)[0] for pt in SWAPPAIR_ALL.flatten()]).reshape([-1, 2])
 
 
-def get_fullbody_swappairs():
-    _, use_landmarks = get_fullbody_landmarks()
+def get_fullbody_swappairs(use_compact_face=False, sort_face=True):
+    _, use_landmarks = get_fullbody_landmarks(use_compact_face, sort_face)
     swappair = np.concatenate([SWAPPAIR_FACE, SWAPPAIR_HANDS, SWAPPAIR_POSE], axis=0)
-    swappair_filtered = np.concatenate([np.where(pt==use_landmarks)[0] for pt in swappair.flatten()])
+    swappair_filtered = np.array([
+        [pt[0], pt[1]] for pt in swappair
+        if pt[0] in use_landmarks and pt[1] in use_landmarks])
+    swappair_filtered = np.concatenate([np.where(pt==use_landmarks)[0] for pt in swappair_filtered.flatten()])
     swappair_filtered = swappair_filtered.reshape([-1, 2])
     return swappair_filtered, swappair
 
