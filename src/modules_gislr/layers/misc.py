@@ -56,27 +56,53 @@ def create_norm(norm_type, dim_model, eps=1e-5, add_bias=None):
             norm = nn.LayerNorm(dim_model, eps=eps)
     elif norm_type == "batch":
         norm = nn.BatchNorm1d(dim_model, eps=eps)
+    elif norm_type == "batch2d":
+        norm = nn.BatchNorm2d(dim_model, eps=eps)
     return norm
 
 
 def apply_norm(norm_layer, feature, channel_first=False):
+    shape = feature.shape
+    if len(shape) > 5:
+        raise NotImplementedError("Unsupported feature shape:{shape}")
     if isinstance(norm_layer, nn.LayerNorm):
         if channel_first:
-            # `[N, C, T] -> [N, T, C] -> [N, C, T]`
-            feature = feature.permute([0, 2, 1]).contiguous()
-            feature = norm_layer(feature)
-            feature = feature.permute([0, 2, 1]).contiguous()
+            if len(shape) == 3:
+                # `[N, C, *] -> [N, *, C] -> [N, C, *]`
+                feature = feature.permute([0, 2, 1]).contiguous()
+                feature = norm_layer(feature)
+                feature = feature.permute([0, 2, 1]).contiguous()
+            elif len(shape) == 4:
+                # `[N, C, *, *] -> [N, *, *, C] -> [N, C, *, *]`
+                feature = feature.permute([0, 2, 3, 1]).contiguous()
+                feature = norm_layer(feature)
+                feature = feature.permute([0, 3, 1, 2]).contiguous()
+            elif len(shape) == 5:
+                # `[N, C, *, *, *] -> [N, *, *, *, C] -> [N, C, *, *, *]`
+                feature = feature.permute([0, 2, 3, 4, 1]).contiguous()
+                feature = norm_layer(feature)
+                feature = feature.permute([0, 4, 1, 2, 3]).contiguous()
         else:
             feature = norm_layer(feature)
     elif isinstance(norm_layer, nn.BatchNorm1d):
         if channel_first:
             feature = norm_layer(feature)
         else:
-            # `[N, T, C] -> [N, C, T]`
-            feature = feature.permute([0, 2, 1]).contiguous()
-            feature = norm_layer(feature)
-            # `[N, C, T] -> [N, T, C]`
-            feature = feature.permute([0, 2, 1]).contiguous()
+            if len(shape) == 3:
+                # `[N, *, C] -> [N, C, *] -> [N, *, C]`
+                feature = feature.permute([0, 2, 1]).contiguous()
+                feature = norm_layer(feature)
+                feature = feature.permute([0, 2, 1]).contiguous()
+            elif len(shape) == 4:
+                # `[N, *, *, C] -> [N, C, *, *] -> [N, *, *, C]`
+                feature = feature.permute([0, 3, 1, 2]).contiguous()
+                feature = norm_layer(feature)
+                feature = feature.permute([0, 2, 3, 1]).contiguous()
+            elif len(shape) == 5:
+                # `[N, *, *, C] -> [N, C, *, *] -> [N, *, *, C]`
+                feature = feature.permute([0, 4, 1, 2, 3]).contiguous()
+                feature = norm_layer(feature)
+                feature = feature.permute([0, 2, 3, 4, 1]).contiguous()
     return feature
 
 
