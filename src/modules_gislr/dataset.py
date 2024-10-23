@@ -285,18 +285,22 @@ def create_dataset(train_hdf5files,
                    val_transforms,
                    test_transforms,
                    convert_to_channel_first,
-                   load_into_ram):
+                   load_into_ram,
+                   skip_train_val=False):
     # Create dataset.
-    train_dataset = HDF5Dataset(train_hdf5files,
-        convert_to_channel_first=convert_to_channel_first,
-        pre_transforms=pre_transforms,
-        transforms=train_transforms,
-        load_into_ram=load_into_ram)
-    val_dataset = HDF5Dataset(val_hdf5files,
-        convert_to_channel_first=convert_to_channel_first,
-        pre_transforms=pre_transforms,
-        transforms=val_transforms,
-        load_into_ram=load_into_ram)
+    train_dataset = None
+    val_dataset = None
+    if not skip_train_val:
+        train_dataset = HDF5Dataset(train_hdf5files,
+            convert_to_channel_first=convert_to_channel_first,
+            pre_transforms=pre_transforms,
+            transforms=train_transforms,
+            load_into_ram=load_into_ram)
+        val_dataset = HDF5Dataset(val_hdf5files,
+            convert_to_channel_first=convert_to_channel_first,
+            pre_transforms=pre_transforms,
+            transforms=val_transforms,
+            load_into_ram=load_into_ram)
     test_dataset = HDF5Dataset(test_hdf5files,
         convert_to_channel_first=convert_to_channel_first,
         pre_transforms=pre_transforms,
@@ -313,15 +317,21 @@ def create_dataloaders(train_dataset, val_dataset, test_dataset,
                        token_shape=token_shape,
                        feature_padding_val=0.0,
                        token_padding_val=token_padding_val)
-    train_dataloader = DataLoader(
-        train_dataset, batch_size=batch_size, collate_fn=merge_fn,
-        shuffle=shuffle, num_workers=num_workers)
-    val_dataloader = DataLoader(
-        val_dataset, batch_size=batch_size, collate_fn=merge_fn,
-        shuffle=False)
-    test_dataloader = DataLoader(
-        test_dataset, batch_size=1, collate_fn=merge_fn,
-        shuffle=False)
+    train_dataloader = None
+    val_dataloader = None
+    test_dataloader = None
+    if train_dataset is not None:
+        train_dataloader = DataLoader(
+            train_dataset, batch_size=batch_size, collate_fn=merge_fn,
+            shuffle=shuffle, num_workers=num_workers)
+    if val_dataset is not None:
+        val_dataloader = DataLoader(
+            val_dataset, batch_size=batch_size, collate_fn=merge_fn,
+            shuffle=False)
+    if test_dataset is not None:
+        test_dataloader = DataLoader(
+            test_dataset, batch_size=1, collate_fn=merge_fn,
+            shuffle=False)
     return train_dataloader, val_dataloader, test_dataloader
 
 
@@ -349,6 +359,8 @@ class DataLoaderSettings():
     # Task.
     task_type: str = "islr"
     num_workers: int = 2
+    # Eval only.
+    skip_train_val: bool = False
 
     def __post_init__(self):
         # Load files.
@@ -368,7 +380,8 @@ class DataLoaderSettings():
         train_dataset, val_dataset, test_dataset = create_dataset(
             train_hdf5files, val_hdf5files, test_hdf5files,
             pre_trans, train_trans, val_trans, test_trans,
-            self.convert_to_channel_first, self.load_into_ram)
+            self.convert_to_channel_first, self.load_into_ram,
+            self.skip_train_val)
 
         # Create dataloaders.
         feature_shape = (len(self.use_features), -1, len(self.use_landmarks))
