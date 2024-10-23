@@ -216,15 +216,15 @@ def merge_padded_batch(batch,
     return retval
 
 
-def load_dataset_files(files, include_swap, val_pid, test_pid):
+def load_dataset_files(files, include_swap, val_name, test_name):
     hdf5_files = [fin for fin in files if ".json" not in fin.name]
     if not include_swap:
         hdf5_files = [fin for fin in hdf5_files if "_swap" not in fin.name]
 
-    train_hdf5files = [fin for fin in hdf5_files if str(val_pid) + ".hdf5" not in fin.name]
-    train_hdf5files = [fin for fin in train_hdf5files if str(test_pid) + ".hdf5" not in fin.name]
-    val_hdf5files = [fin for fin in hdf5_files if str(val_pid) + ".hdf5" in fin.name]
-    test_hdf5files = [fin for fin in hdf5_files if str(test_pid) + ".hdf5" in fin.name]
+    train_hdf5files = [fin for fin in hdf5_files if val_name + ".hdf5" not in fin.name]
+    train_hdf5files = [fin for fin in train_hdf5files if test_name + ".hdf5" not in fin.name]
+    val_hdf5files = [fin for fin in hdf5_files if val_name + ".hdf5" in fin.name]
+    test_hdf5files = [fin for fin in hdf5_files if test_name + ".hdf5" in fin.name]
     return train_hdf5files, val_hdf5files, test_hdf5files
 
 
@@ -331,8 +331,8 @@ class DataLoaderSettings():
     # Dataset and dataloader.
     load_into_ram: bool = True
     shuffle: bool = True
-    val_pid: int = 16069
-    test_pid: int = 16069
+    val_name: str = "16069"
+    test_name: str = "16069"
     include_swap: bool = False
     convert_to_channel_first: bool = False
     dataset_dir: PurePath = field(default_factory=Path(""))
@@ -354,7 +354,7 @@ class DataLoaderSettings():
         # Load files.
         files = list(self.dataset_dir.iterdir())
         train_hdf5files, val_hdf5files, test_hdf5files = load_dataset_files(
-            files, self.include_swap, self.val_pid, self.test_pid)
+            files, self.include_swap, self.val_name, self.test_name)
 
         self.key2token, self.token2key, self.vocaburary = load_dictionary(
             files, self.task_type)
