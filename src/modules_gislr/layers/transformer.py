@@ -28,6 +28,7 @@ from pydantic import (
     Field)
 
 from torch import nn
+from torch.nn import functional as F
 
 # Local modules
 from .misc import (
@@ -562,14 +563,14 @@ class TransformerEnISLR(nn.Module):
         # Apply pooling.
         feature = self.pooling(feature)
         if feature_pad_mask is not None:
-            # Cast to apply pooling.
-            feature_pad_mask = feature_pad_mask.to(feature.dtype)
-            feature_pad_mask = self.pooling(feature_pad_mask.unsqueeze(-1)).squeeze(-1)
-            # Binarization.
-            # This removes averaged signals with padding.
-            feature_pad_mask = feature_pad_mask > 0.5
-            if feature_causal_mask is not None:
-                feature_causal_mask = make_causal_mask(feature_pad_mask)
+            if feature_pad_mask.shape[-1] != feature.shape[1]:
+                feature_pad_mask = F.interpolate(
+                    feature_pad_mask.unsqueeze(1).float(),
+                    feature.shape[1],
+                    mode="nearest")
+                feature_pad_mask = feature_pad_mask.squeeze(1) > 0.5
+                if feature_causal_mask is not None:
+                    feature_causal_mask = make_causal_mask(feature_pad_mask)
 
         feature = self.tr_encoder(
             feature=feature,
