@@ -61,6 +61,7 @@ DIR_OUTPUT = None
 class ConformerConvBlockSettings(ConfiguredModel):
     dim_model: int = 64
     kernel_size: int = Field(default=3, ge=3)
+    stride: int = Field(default=1, ge=1)
     conv_type: str = Field(default="separable",
         pattern=r"separable|standard|predepth")
     norm_type: str = Field(default="batch",
@@ -129,7 +130,7 @@ class ConformerConvBlock(nn.Module):
                 in_channels=settings.dim_model,
                 out_channels=settings.dim_model,
                 kernel_size=settings.kernel_size,
-                stride=1,
+                stride=settings.stride,
                 padding=padding,
                 groups=settings.dim_model,
                 padding_mode=settings.padding_mode,
@@ -146,7 +147,7 @@ class ConformerConvBlock(nn.Module):
                 in_channels=settings.dim_model,
                 out_channels=settings.dim_model,
                 kernel_size=settings.kernel_size,
-                stride=1,
+                stride=settings.stride,
                 padding=padding,
                 groups=settings.dim_model,
                 padding_mode=settings.padding_mode,
@@ -171,7 +172,7 @@ class ConformerConvBlock(nn.Module):
                  in_channels=settings.dim_model,
                  out_channels=settings.dim_model * 2,  # for GLU
                  kernel_size=settings.kernel_size,
-                 stride=1,
+                 stride=settings.stride,
                  padding=self.padding,
                  bias=settings.add_bias)),
             ("glu", nn.GLU(dim=1))])
