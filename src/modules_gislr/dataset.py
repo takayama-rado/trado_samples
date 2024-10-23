@@ -374,7 +374,7 @@ class DataLoaderSettings():
         feature_shape = (len(self.use_features), -1, len(self.use_landmarks))
         token_shape = (-1,)
         if self.task_type == "islr":
-            token_padding_val = self.vocaburary + 1
+            token_padding_val = self.vocaburary
         elif self.task_type in ["cslr_s2s", "cslr_ctc"]:
             token_padding_val = self.key2token["<pad>"]
         self.train_dataloader, self.val_dataloader, self.test_dataloader = create_dataloaders(
