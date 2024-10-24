@@ -31,6 +31,8 @@ from torch import nn
 from torch.nn import functional as F
 
 # Local modules
+from .feature_extraction import (
+    create_fext_module)
 from .misc import (
     ConfiguredModel,
     GPoolRecognitionHeadSettings,
@@ -506,8 +508,8 @@ class TransformerEnISLRSettings(ConfiguredModel):
         self.encoder_settings.model_post_init(__context)
         self.head_settings.model_post_init(__context)
 
-    def build_layer(self):
-        return TransformerEnISLR(self)
+    def build_layer(self, fext_settings=None):
+        return TransformerEnISLR(self, fext_settings)
 
 
 def build_pooling_layer(pooling_type):
@@ -528,14 +530,15 @@ def build_pooling_layer(pooling_type):
 
 class TransformerEnISLR(nn.Module):
     def __init__(self,
-                 settings):
+                 settings,
+                 fext_settings=None):
         super().__init__()
         assert isinstance(settings, TransformerEnISLRSettings)
         self.settings = settings
+        self.fext_settings = fext_settings
 
         # Feature extraction.
-        self.linear = nn.Linear(settings.in_channels, settings.inter_channels)
-        self.activation = select_reluwise_activation(settings.activation)
+        self.fext_module = create_fext_module(fext_settings)
 
         self.pooling = build_pooling_layer(settings.pooling_type)
 
@@ -545,22 +548,21 @@ class TransformerEnISLR(nn.Module):
 
         self.head = settings.head_settings.build_layer()
 
+    def _apply_fext(self,
+                    feature):
+        for layer in self.fext_module:
+            feature = layer(feature)
+        return feature
+
     def forward(self,
                 feature,
                 feature_causal_mask=None,
                 feature_pad_mask=None):
         # Feature extraction.
-        # `[N, C, T, J] -> [N, T, C, J] -> [N, T, C*J] -> [N, T, C']`
-        N, C, T, J = feature.shape
-        feature = feature.permute([0, 2, 1, 3])
-        feature = feature.reshape(N, T, -1)
+        feature = self._apply_fext(feature)
 
-        feature = self.linear(feature)
-        if torch.isnan(feature).any():
-            raise ValueError()
-        feature = self.activation(feature)
-        if torch.isnan(feature).any():
-            raise ValueError()
+        # `[N, C, T] -> [N, T, C]`
+        feature = feature.permute([0, 2, 1])
 
         # Apply pooling.
         feature = self.pooling(feature)
