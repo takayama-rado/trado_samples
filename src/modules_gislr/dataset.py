@@ -133,6 +133,7 @@ class HDF5Dataset(Dataset):
             if self.pre_transforms:
                 _data = self.pre_transforms(_data)
         _data = self.transforms(_data)
+        _data["key"] = info["data_key"]
         return _data
 
     def __len__(self):
@@ -175,6 +176,7 @@ def merge_padded_batch(batch,
                        token_padding_val=0):
     feature_batch = [sample["feature"] for sample in batch]
     token_batch = [sample["token"] for sample in batch]
+    key_batch = [sample["key"] for sample in batch]
 
     # ==========================================================
     # Merge feature.
@@ -212,7 +214,8 @@ def merge_padded_batch(batch,
         "feature": merged_feature,
         "token": merged_token,
         "feature_pad_mask": feature_pad_mask,
-        "token_pad_mask": token_pad_mask}
+        "token_pad_mask": token_pad_mask,
+        "key": key_batch}
     return retval
 
 
