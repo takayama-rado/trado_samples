@@ -33,6 +33,8 @@ from .layers.rnn import (
     RNNCSLR)
 from .layers.transformer import (
     TransformerCSLR)
+from .perturbation import (
+    FGM)
 from .utils import (
     make_causal_mask)
 
@@ -46,7 +48,8 @@ DIR_OUTPUT = None
 
 
 def train_loop(dataloader, model, loss_fn, optimizer, device, use_mask=True,
-               return_pred_times=False):
+               return_pred_times=False,
+               apply_fgm=False):
     num_batches = len(dataloader)
     train_loss = 0
     size = len(dataloader.dataset)
@@ -60,6 +63,9 @@ def train_loop(dataloader, model, loss_fn, optimizer, device, use_mask=True,
 
     # Switch to training mode.
     model.train()
+    fgm = None
+    if apply_fgm is True:
+        fgm = FGM(model)
     # Main loop.
     print("Start training.")
     start = time.perf_counter()
@@ -87,6 +93,17 @@ def train_loop(dataloader, model, loss_fn, optimizer, device, use_mask=True,
         # Back propagation.
         optimizer.zero_grad()
         loss.backward()
+
+        if fgm is not None:
+            fgm.attack()
+            # Train with perturbation.
+            if use_mask:
+                pred_adv = model(feature, feature_pad_mask=feature_pad_mask)
+            else:
+                pred_adv = model(feature)
+            loss_adv = loss_fn(pred_adv, token.squeeze(-1))
+            loss_adv.backward()
+            fgm.restore()
         optimizer.step()
 
         train_loss += loss.item()
