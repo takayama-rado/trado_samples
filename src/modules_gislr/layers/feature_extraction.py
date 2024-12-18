@@ -663,14 +663,15 @@ class CNN2DFeatureExtractor(nn.Module):
             self.residual = Zero()
 
     def forward(self,
-                feature):
+                feature,
+                mask=None):
         res = self.residual(feature)
         feature = self.conv(feature)
 
         if self.settings.causal is True:
             feature = feature[:, :, :-self.settings.padding[0]]
 
-        feature = apply_norm(self.norm, feature, channel_first=True)
+        feature = apply_norm(self.norm, feature, channel_first=True, mask=mask)
 
         feature = self.activation(feature)
         feature = self.dropout(feature)
@@ -760,9 +761,10 @@ class STSeparableCNN2DFeatureExtractor(nn.Module):
         self.tconv = settings.temporal_conv_settings.build_layer()
 
     def forward(self,
-                feature):
-        feature = self.sconv(feature)
-        feature = self.tconv(feature)
+                feature,
+                mask=None):
+        feature = self.sconv(feature, mask=mask)
+        feature = self.tconv(feature, mask=mask)
         return feature
 
 
