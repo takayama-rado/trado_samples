@@ -134,7 +134,7 @@ class PartsBasedNormalization():
                  align_mode="framewise",
                  scale_mode="framewise") -> None:
         assert align_mode in ["framewise", "unique"]
-        assert scale_mode in ["framewise", "unique", "none"]
+        assert scale_mode in ["framewise", "unique", "std", "none"]
         self.align_mode = align_mode
         self.scale_mode = scale_mode
 
@@ -184,6 +184,15 @@ class PartsBasedNormalization():
     def _calc_unit(self, feature, unit_lm1, unit_lm2, unit_range):
         if self.scale_mode == "none":
             return 1.0
+        if self.scale_mode == "std":
+            mask = self._gen_tmask(feature)
+            mask = mask.reshape([mask.shape[1]])
+            if mask.any():
+                _feature = feature[:, mask, :]
+                unit = _feature.std()
+            else:
+                unit = 1.0
+            return unit
         # The frame-wise unit lengths are unstable.
         # So, we calculate average unit length.
         # Extract.
