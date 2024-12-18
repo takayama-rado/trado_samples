@@ -123,12 +123,12 @@ def save_checkpoint(ckpt_path, model,
 def load_checkpoint(ckpt_path, model,
                     optimizer=None,
                     scheduler=None):
-    checkpoint = torch.load(ckpt_path)
+    checkpoint = torch.load(ckpt_path, weights_only=False)
 
     if hasattr(model, "module"):
-        model.module.load_state_dict(checkpoint["model"])
+        model.module.load_state_dict(checkpoint["model"], strict=True)
     else:
-        model.load_state_dict(checkpoint["model"])
+        model.load_state_dict(checkpoint["model"], strict=True)
     epoch = checkpoint["epoch"]
     random.setstate(checkpoint["random"])
     np.random.set_state(checkpoint["np_random"])
