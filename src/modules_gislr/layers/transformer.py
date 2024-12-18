@@ -209,6 +209,9 @@ class MultiheadAttention(nn.Module):
         attw = attw.permute(0, 3, 1, 2)
         return cvec, attw
 
+    def extra_repr(self):
+        return f"num_heads={self.num_heads}"
+
 
 class PositionwiseFeedForwardSettings(ConfiguredModel):
     dim_model: int = 64
