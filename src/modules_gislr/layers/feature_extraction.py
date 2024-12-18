@@ -136,26 +136,29 @@ class LinearFeatureExtractor(nn.Module):
 class EfficientChannelAttention(nn.Module):
     def __init__(self,
                  spatial_channels=1,
-                 kernel_size=3):
+                 kernel_size=3,
+                 post_scale=True):
         super().__init__()
-        if spatial_channels == 1:
-            self.avg_pool = nn.AdaptiveAvgPool1d(1)
-        elif spatial_channels == 2:
-            self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        else:
-            message = f"ECA for {spatial_channels} spatial channels is not implemented."
-            raise NotImplementedError(message)
 
         self.conv = nn.Conv1d(1, 1, kernel_size=kernel_size,
             padding=(kernel_size-1) // 2, bias=False)
         self.sigmoid = nn.Sigmoid()
 
+        self.post_scale = post_scale
         self.spatial_channels = spatial_channels
 
     def _forward_sc1(self,
-                     feature):
+                     feature,
+                     mask=None):
         # `[N, C, T] -> [N, C, 1] -> [N, 1, C]`
-        att = self.avg_pool(feature)
+        if mask is not None:
+            tlength = mask.sum(dim=-1)
+            att = feature * mask.unsqueeze(1)
+            att = att.sum(dim=-1) / tlength.unsqueeze(-1)
+            att = att.unsqueeze(-1)
+        else:
+            # att = self.avg_pool(feature)
+            att = F.adaptive_avg_pool1d(feature, 1)
         att = att.permute([0, 2, 1])
         att = self.conv(att)
         # `[N, 1, C] -> [N, C, 1]`
@@ -163,9 +166,16 @@ class EfficientChannelAttention(nn.Module):
         return att
 
     def _forward_sc2(self,
-                     feature):
+                     feature,
+                     mask=None):
         # `[N, C, T, J] -> [N, C, 1, 1] -> [N, 1, C]`
-        att = self.avg_pool(feature)
+        if mask is not None:
+            tlength = mask.sum(dim=-2)
+            att = feature * mask.unsqueeze(1).unsqueeze(1)
+            att = att.sum(dim=[-2, -1]) / tlength.unsqueeze(-1).unsqueeze(-1)
+        else:
+            # att = self.avg_pool(feature)
+            att = F.adaptive_avg_pool2d(feature, 1)
         att = att.squeeze(-1)
         att = att.permute([0, 2, 1])
         att = self.conv(att)
@@ -175,12 +185,17 @@ class EfficientChannelAttention(nn.Module):
         return att
 
     def forward(self,
-                feature):
+                feature,
+                mask):
         if self.spatial_channels == 1:
-            att = self._forward_sc1(feature)
+            att = self._forward_sc1(feature, mask=mask)
         elif self.spatial_channels == 2:
-            att = self._forward_sc2(feature)
+            att = self._forward_sc2(feature, mask=mask)
         att = self.sigmoid(att)
+        if self.post_scale:
+            channels = att.shape[1]
+            scale = channels / att.sum(dim=1, keepdims=True)
+            att = scale * att
         return feature * att
 
 
