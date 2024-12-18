@@ -33,7 +33,7 @@ from torch import nn
 from torch.nn import functional as F
 
 # Local modules
-
+from modules_gislr.layers import maskednorm as mn
 
 # Execution settings
 VERSION = u"%(prog)s dev"
@@ -58,10 +58,16 @@ def create_norm(norm_type, dim_model, eps=1e-5, add_bias=None):
         norm = nn.BatchNorm1d(dim_model, eps=eps)
     elif norm_type == "batch2d":
         norm = nn.BatchNorm2d(dim_model, eps=eps)
+    elif norm_type == "masked_batch":
+        ntype1d, _ = mn.select_norm_type([norm_type])
+        norm = mn.create_norm_layer(ntype1d, dim_model)
+    elif norm_type == "masked_batch2d":
+        _, ntype2d = mn.select_norm_type([norm_type])
+        norm = mn.create_norm_layer(ntype2d, dim_model)
     return norm
 
 
-def apply_norm(norm_layer, feature, channel_first=False):
+def apply_norm(norm_layer, feature, mask=None, channel_first=False):
     shape = feature.shape
     if len(shape) > 5:
         raise NotImplementedError("Unsupported feature shape:{shape}")
@@ -103,6 +109,12 @@ def apply_norm(norm_layer, feature, channel_first=False):
                 feature = feature.permute([0, 4, 1, 2, 3]).contiguous()
                 feature = norm_layer(feature)
                 feature = feature.permute([0, 2, 3, 4, 1]).contiguous()
+    elif isinstance(norm_layer, mn.MaskedSwitchNorm1d):
+        feature = mn.apply_normalization(norm_layer, feature, mask=mask,
+            channel_last=not channel_first)
+    elif isinstance(norm_layer, mn.MaskedSwitchNorm2d):
+        feature = mn.apply_normalization(norm_layer, feature, mask=mask,
+            channel_last=not channel_first)
     return feature
 
 
