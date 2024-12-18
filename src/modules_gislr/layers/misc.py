@@ -211,6 +211,8 @@ class TemporalAttention(nn.Module):
 class GPoolRecognitionHeadSettings(ConfiguredModel):
     in_channels: int = 64
     out_channels: int = 64
+    dropout: float = 0.0
+    pooling_mode: str = Field(default="avg", pattern=r"avg|max")
 
     def build_layer(self):
         return GPoolRecognitionHead(self)
@@ -222,6 +224,9 @@ class GPoolRecognitionHead(nn.Module):
         super().__init__()
         assert isinstance(settings, GPoolRecognitionHeadSettings)
         self.settings = settings
+        self.pooling_mode = settings.pooling_mode
+
+        self.dropout = nn.Dropout(p=0)
 
         self.head = nn.Linear(settings.in_channels, settings.out_channels)
         self._init_weight()
@@ -237,10 +242,19 @@ class GPoolRecognitionHead(nn.Module):
         if feature_pad_mask is not None:
             tlength = feature_pad_mask.sum(dim=-1)
             feature = feature * feature_pad_mask.unsqueeze(1)
-            feature = feature.sum(dim=-1) / tlength.unsqueeze(-1)
+            if self.pooling_mode == "avg":
+                feature = feature.sum(dim=-1) / tlength.unsqueeze(-1)
+            if self.pooling_mode == "max":
+                feature = F.max_pool1d(feature, kernel_size=feature.shape[-1])
         else:
-            feature = F.avg_pool1d(feature, kernel_size=feature.shape[-1])
+            if self.pooling_mode == "avg":
+                feature = F.avg_pool1d(feature, kernel_size=feature.shape[-1])
+            elif self.pooling_mode == "max":
+                feature = F.max_pool1d(feature, kernel_size=feature.shape[-1])
         feature = feature.reshape(feature.shape[0], -1)
+
+        # Dropout.
+        feature = self.dropout(feature)
 
         # Predict.
         feature = self.head(feature)
