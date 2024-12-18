@@ -1220,21 +1220,46 @@ class RandomDropSpatial():
         if not (mask == 0.0).all():
             feature *= mask
 
-        # For debug.
-        # mask = mask.astype(np.uint8)
-        # mask *= 255
-        # print(mask.shape)
-        # cv2.imwrite("out.png", np.expand_dims(mask, axis=-1))
-
         return data
 
 
 class RandomDropTemporal():
     def __init__(self,
                  apply_ratio=1.0,
-                 size=(0.1, 0.5)):
+                 size=(0.1, 0.5),
+                 mask_mode="area",
+                 target_joints=None):
         self.apply_ratio = apply_ratio
         self.size = size
+        self.mask_mode = mask_mode
+        self.target_joints = target_joints
+
+    def _drop_area(self, mask, size, tlength):
+        start = np.random.random()
+        end = start + size
+        start = int(tlength * start)
+        end = min(int(tlength * end), tlength)
+
+        # Masking.
+        if self.target_joints:
+            mask[None, start: end, self.target_joints] = 0.0
+        else:
+            mask[None, start: end, :] = 0.0
+        return mask
+
+    def _drop_random(self, mask, size, tlength):
+        # bmask indicate drop position.
+        temp = np.random.random(tlength)
+        drop_tindices = np.where(temp <= size)[0]
+
+        # Masking.
+        if self.target_joints:
+            # Advances indexing using broad casting.
+            # Please refer https://numpy.org/devdocs/user/basics.indexing.html
+            mask[None, drop_tindices[:, None], self.target_joints] = 0.0
+        else:
+            mask[None, drop_tindices, :] = 0.0
+        return mask
 
     def __call__(self,
                  data: Dict[str, Any]) -> Dict[str, Any]:
@@ -1248,23 +1273,19 @@ class RandomDropTemporal():
         # Calculate drop range.
         tlength = feature.shape[1]
         size = np.random.random() * (self.size[1] - self.size[0]) + self.size[0]
-        start = np.random.random()
-        end = start + size
-        start = int(tlength * start)
-        end = min(int(tlength * end), tlength)
-
-        # Masking.
-        mask[None, start: end, :] = 0.0
+        if self.mask_mode == "area":
+            mask = self._drop_area(mask, size, tlength)
+        elif self.mask_mode == "random":
+            mask = self._drop_random(mask, size, tlength)
+        elif self.mask_mode == "both":
+            if random.random() < self.apply_ratio / 2:
+                mask = self._drop_area(mask, size, tlength)
+            else:
+                mask = self._drop_random(mask, size, tlength)
 
         # Avoid to drop all signals.
         if not (mask == 0.0).all():
             feature *= mask
-
-        # For debug.
-        # mask = mask.astype(np.uint8)
-        # mask *= 255
-        # print(mask.shape)
-        # cv2.imwrite("out.png", np.expand_dims(mask, axis=-1))
 
         data["feature"] = feature
         return data
