@@ -275,9 +275,9 @@ class MacaronNetDecoderLayerSettings(ConfiguredModel):
     dim_model: int = 64
     activation: str = Field(default="relu",
         pattern=r"relu|gelu|swish|silu|mish|geluacc|tanhexp")
-    norm_type_sattn: str = Field(default="layer", pattern=r"layer|batch")
-    norm_type_cattn: str = Field(default="layer", pattern=r"layer|batch")
-    norm_type_pffn: str = Field(default="layer", pattern=r"layer|batch")
+    norm_type_sattn: str = Field(default="layer", pattern=r"layer|batch|masked_batch|masked_batch2d")
+    norm_type_cattn: str = Field(default="layer", pattern=r"layer|batch|masked_batch|masked_batch2d")
+    norm_type_pffn: str = Field(default="layer", pattern=r"layer|batch|masked_batch|masked_batch2d")
     norm_eps: float = 1e-5
     dropout: float = 0.1
     fc_factor: float = 0.5
@@ -381,7 +381,7 @@ class MacaronNetDecoderLayer(nn.Module):
         # First half PFFN
         #################################################
         residual = tgt_feature
-        tgt_feature = apply_norm(self.norm_pffn1, tgt_feature)
+        tgt_feature = apply_norm(self.norm_pffn1, tgt_feature, mask=tgt_key_padding_mask)
         tgt_feature = self.pffn1(tgt_feature)
         tgt_feature = self.fc_factor * self.dropout(tgt_feature) + residual
 
@@ -389,7 +389,7 @@ class MacaronNetDecoderLayer(nn.Module):
         # MHSA
         #################################################
         residual = tgt_feature
-        tgt_feature = apply_norm(self.norm_sattn, tgt_feature)
+        tgt_feature = apply_norm(self.norm_sattn, tgt_feature, mask=tgt_key_padding_mask)
         tgt_feature, self.sattw = self.self_attn(
             key=tgt_feature,
             value=tgt_feature,
@@ -401,7 +401,7 @@ class MacaronNetDecoderLayer(nn.Module):
         # MHCA
         #################################################
         residual = tgt_feature
-        tgt_feature = apply_norm(self.norm_cattn, tgt_feature)
+        tgt_feature = apply_norm(self.norm_cattn, tgt_feature, mask=tgt_key_padding_mask)
         tgt_feature, self.cattw = self.cross_attn(
             key=enc_feature,
             value=enc_feature,
@@ -413,7 +413,7 @@ class MacaronNetDecoderLayer(nn.Module):
         # Second half PFFN
         #################################################
         residual = tgt_feature
-        tgt_feature = apply_norm(self.norm_pffn2, tgt_feature)
+        tgt_feature = apply_norm(self.norm_pffn2, tgt_feature, mask=tgt_key_padding_mask)
         tgt_feature = self.pffn2(tgt_feature)
         tgt_feature = self.dropout(tgt_feature) + residual
         return tgt_feature

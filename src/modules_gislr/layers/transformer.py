@@ -598,9 +598,9 @@ class TransformerDecoderLayerSettings(ConfiguredModel):
     dim_model: int = 64
     activation: str = Field(default="relu",
         pattern=r"relu|gelu|swish|silu|mish|geluacc|tanhexp")
-    norm_type_sattn: str = Field(default="layer", pattern=r"layer|batch")
-    norm_type_cattn: str = Field(default="layer", pattern=r"layer|batch")
-    norm_type_pffn: str = Field(default="layer", pattern=r"layer|batch")
+    norm_type_sattn: str = Field(default="layer", pattern=r"layer|batch|masked_batch|masked_batch2d")
+    norm_type_cattn: str = Field(default="layer", pattern=r"layer|batch|masked_batch|masked_batch2d")
+    norm_type_pffn: str = Field(default="layer", pattern=r"layer|batch|masked_batch|masked_batch2d")
     norm_eps: float = 1e-5
     norm_first: bool = True
     dropout: float = 0.1
@@ -720,7 +720,7 @@ class PreNormTransformerDecoderLayer(nn.Module):
         # MHSA
         #################################################
         residual = tgt_feature
-        tgt_feature = apply_norm(self.norm_sattn, tgt_feature)
+        tgt_feature = apply_norm(self.norm_sattn, tgt_feature, mask=tgt_key_padding_mask)
         tgt_feature, self.sattw = self.self_attn(
             key=tgt_feature,
             value=tgt_feature,
@@ -732,7 +732,7 @@ class PreNormTransformerDecoderLayer(nn.Module):
         # MHCA
         #################################################
         residual = tgt_feature
-        tgt_feature = apply_norm(self.norm_cattn, tgt_feature)
+        tgt_feature = apply_norm(self.norm_cattn, tgt_feature, mask=tgt_key_padding_mask)
         tgt_feature, self.cattw = self.cross_attn(
             key=enc_feature,
             value=enc_feature,
@@ -744,7 +744,7 @@ class PreNormTransformerDecoderLayer(nn.Module):
         # PFFN
         #################################################
         residual = tgt_feature
-        tgt_feature = apply_norm(self.norm_pffn, tgt_feature)
+        tgt_feature = apply_norm(self.norm_pffn, tgt_feature, mask=tgt_key_padding_mask)
         tgt_feature = self.pffn(tgt_feature)
         tgt_feature = self.dropout(tgt_feature) + residual
         return tgt_feature
@@ -817,7 +817,7 @@ class PostNormTransformerDecoderLayer(nn.Module):
             query=tgt_feature,
             mask=tgt_san_mask)
         tgt_feature = self.dropout(tgt_feature) + residual
-        tgt_feature = apply_norm(self.norm_sattn, tgt_feature)
+        tgt_feature = apply_norm(self.norm_sattn, tgt_feature, mask=tgt_key_padding_mask)
 
         #################################################
         # MHCA
@@ -829,7 +829,7 @@ class PostNormTransformerDecoderLayer(nn.Module):
             query=tgt_feature,
             mask=enc_tgt_mask)
         tgt_feature = self.dropout(tgt_feature) + residual
-        tgt_feature = apply_norm(self.norm_cattn, tgt_feature)
+        tgt_feature = apply_norm(self.norm_cattn, tgt_feature, mask=tgt_key_padding_mask)
 
         #################################################
         # PFFN
@@ -837,7 +837,7 @@ class PostNormTransformerDecoderLayer(nn.Module):
         residual = tgt_feature
         tgt_feature = self.pffn(tgt_feature)
         tgt_feature = self.dropout(tgt_feature) + residual
-        tgt_feature = apply_norm(self.norm_pffn, tgt_feature)
+        tgt_feature = apply_norm(self.norm_pffn, tgt_feature, mask=tgt_key_padding_mask)
 
         return tgt_feature
 
