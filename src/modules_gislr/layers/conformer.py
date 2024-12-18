@@ -421,8 +421,8 @@ class ConformerDecoderLayerSettings(ConfiguredModel):
 
     mhsa_settings: MultiheadAttentionSettings = Field(
         default_factory=lambda: MultiheadAttentionSettings())
-    conv_settings: ConformerConvBlockSettings = Field(
-        default_factory=lambda: ConformerConvBlockSettings())
+    conv_settings: CNN1DFeatureExtractorSettings = Field(
+        default_factory=lambda: CNN1DFeatureExtractorSettings())
     mhca_settings: MultiheadAttentionSettings = Field(
         default_factory=lambda: MultiheadAttentionSettings())
     pffn_settings: PositionwiseFeedForwardSettings = Field(
@@ -435,7 +435,8 @@ class ConformerDecoderLayerSettings(ConfiguredModel):
         self.mhsa_settings.att_dim = self.dim_model
         self.mhsa_settings.out_dim = self.dim_model
         # Adjust conv_settings.
-        self.conv_settings.dim_model = self.dim_model
+        self.conv_settings.in_channels = self.dim_model
+        self.conv_settings.out_channels = self.dim_model
         self.conv_settings.activation = self.activation
         self.conv_settings.causal = True  # Fofce causal convolution.
         # Adjust mhca_settings.
@@ -548,7 +549,10 @@ class PreConvConformerDecoderLayer(nn.Module):
         # `[N, qlen, dim_model]`
         residual = tgt_feature
         tgt_feature = apply_norm(self.norm_conv, tgt_feature)
-        tgt_feature = self.conv(tgt_feature)
+        # `[N, T, C] -> [N, C, T] -> [N, T, C]`
+        tgt_feature = tgt_feature.permute([0, 2, 1])
+        tgt_feature = self.conv(tgt_feature, mask=tgt_key_padding_mask)
+        tgt_feature = tgt_feature.permute([0, 2, 1])
         tgt_feature = self.dropout(tgt_feature) + residual
 
         #################################################
@@ -684,7 +688,10 @@ class PostConvConformerDecoderLayer(nn.Module):
         # `[N, qlen, dim_model]`
         residual = tgt_feature
         tgt_feature = apply_norm(self.norm_conv, tgt_feature)
-        tgt_feature = self.conv(tgt_feature)
+        # `[N, T, C] -> [N, C, T] -> [N, T, C]`
+        tgt_feature = tgt_feature.permute([0, 2, 1])
+        tgt_feature = self.conv(tgt_feature, mask=tgt_key_padding_mask)
+        tgt_feature = tgt_feature.permute([0, 2, 1])
         tgt_feature = self.dropout(tgt_feature) + residual
 
         #################################################
