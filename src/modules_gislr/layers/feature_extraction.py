@@ -104,7 +104,8 @@ class LinearFeatureExtractor(nn.Module):
             self.residual = Zero()
 
     def forward(self,
-                feature):
+                feature,
+                mask=None):
         shape = feature.shape
         if self.channel_first:
             # `[N, C, T] -> [N, T, C]`
@@ -122,7 +123,7 @@ class LinearFeatureExtractor(nn.Module):
                 raise NotImplementedError(f"Unsupported feature shape:{shape}.")
         res = self.residual(feature)
         feature = self.linear(feature)
-        feature = apply_norm(self.norm, feature, channel_first=False)
+        feature = apply_norm(self.norm, feature, channel_first=False, mask=mask)
         feature = self.activation(feature)
         feature = self.dropout(feature)
         feature = feature + res
