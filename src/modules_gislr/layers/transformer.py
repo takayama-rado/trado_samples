@@ -253,8 +253,8 @@ class TransformerEncoderLayerSettings(ConfiguredModel):
     dim_pffn: int = 256
     activation: str = Field(default="relu",
         pattern=r"relu|gelu|swish|silu|mish|geluacc|tanhexp")
-    norm_type_sattn: str = Field(default="layer", pattern=r"layer|batch")
-    norm_type_pffn: str = Field(default="layer", pattern=r"layer|batch")
+    norm_type_sattn: str = Field(default="layer", pattern=r"layer|batch|masked_batch|masked_batch2d")
+    norm_type_pffn: str = Field(default="layer", pattern=r"layer|batch|masked_batch|masked_batch2d")
     norm_eps: float = 1e-5
     norm_first: bool = True
     dropout: float = 0.1
@@ -343,7 +343,7 @@ class PreNormTransformerEncoderLayer(nn.Module):
         #################################################
         # `[N, qlen, dim_model]`
         residual = feature
-        feature = apply_norm(self.norm_sattn, feature)
+        feature = apply_norm(self.norm_sattn, feature, mask=src_key_padding_mask)
         feature, self.attw = self.self_attn(
             key=feature,
             value=feature,
@@ -356,7 +356,7 @@ class PreNormTransformerEncoderLayer(nn.Module):
         #################################################
         residual = feature
         # `[N, qlen, dim_model]`
-        feature = apply_norm(self.norm_pffn, feature)
+        feature = apply_norm(self.norm_pffn, feature, mask=src_key_padding_mask)
         feature = self.pffn(feature)
         feature = self.dropout(feature) + residual
 
@@ -414,7 +414,7 @@ class PostNormTransformerEncoderLayer(nn.Module):
             query=feature,
             mask=san_mask)
         feature = self.dropout(feature) + residual
-        feature = apply_norm(self.norm_sattn, feature)
+        feature = apply_norm(self.norm_sattn, feature, mask=src_key_padding_mask)
 
         #################################################
         # PFFN
@@ -423,14 +423,14 @@ class PostNormTransformerEncoderLayer(nn.Module):
         # `[N, qlen, dim_model]`
         feature = self.pffn(feature)
         feature = self.dropout(feature) + residual
-        feature = apply_norm(self.norm_pffn, feature)
+        feature = apply_norm(self.norm_pffn, feature, mask=src_key_padding_mask)
 
         return feature
 
 
 class TransformerEncoderSettings(ConfiguredModel):
     num_layers: int = 1
-    norm_type_tail: str = Field(default="layer", pattern=r"layer|batch")
+    norm_type_tail: str = Field(default="layer", pattern=r"layer|batch|masked_batch|masked_batch2d")
     norm_eps: float = 1e-5
     add_bias: bool = True
     add_tailnorm: bool = True
@@ -477,7 +477,7 @@ class TransformerEncoder(nn.Module):
             feature = layer(feature,
                             causal_mask,
                             src_key_padding_mask)
-        feature = apply_norm(self.norm_tail, feature)
+        feature = apply_norm(self.norm_tail, feature, mask=src_key_padding_mask)
         return feature
 
 
@@ -552,9 +552,10 @@ class TransformerEnISLR(nn.Module):
         self.head = settings.head_settings.build_layer()
 
     def _apply_fext(self,
-                    feature):
+                    feature,
+                    mask=None):
         for layer in self.fext_module:
-            feature = layer(feature)
+            feature = layer(feature, mask=mask)
         return feature
 
     def forward(self,
@@ -562,7 +563,7 @@ class TransformerEnISLR(nn.Module):
                 feature_causal_mask=None,
                 feature_pad_mask=None):
         # Feature extraction.
-        feature = self._apply_fext(feature)
+        feature = self._apply_fext(feature, mask=feature_pad_mask)
 
         # `[N, C, T] -> [N, T, C]`
         feature = feature.permute([0, 2, 1])
