@@ -29,6 +29,9 @@ from pydantic import (
 from torch import nn
 
 # Local modules
+from .feature_extraction import (
+    CNN1DFeatureExtractorSettings,
+    create_fext_module)
 from .misc import (
     ConfiguredModel,
     GPoolRecognitionHeadSettings,
@@ -58,156 +61,6 @@ DIR_INPUT = None
 DIR_OUTPUT = None
 
 
-class ConformerConvBlockSettings(ConfiguredModel):
-    dim_model: int = 64
-    kernel_size: int = Field(default=3, ge=3)
-    stride: int = Field(default=1, ge=1)
-    conv_type: str = Field(default="separable",
-        pattern=r"separable|standard|predepth")
-    norm_type: str = Field(default="batch",
-        pattern=r"layer|batch")
-    activation: str = Field(default="swish",
-        pattern=r"relu|gelu|swish|silu|mish|geluacc|tanhexp")
-    padding_mode: str = Field(default="zeros",
-        pattern=r"zeros|reflect|replicate|circular")
-    add_tail_conv: bool = True
-    causal: bool = False
-    add_bias: bool = True
-
-    def model_post_init(self, __context):
-        message = f"kernel_size:{self.kernel_size} must be the odd number."
-        assert (self.kernel_size - 1) % 2 == 0, message
-
-    def build_layer(self):
-        return ConformerConvBlock(self)
-
-
-class ConformerConvBlock(nn.Module):
-    def __init__(self,
-                 settings):
-        super().__init__()
-        assert isinstance(settings, ConformerConvBlockSettings)
-        self.settings = settings
-        self.causal = settings.causal
-
-        if settings.causal:
-            self.padding = (settings.kernel_size - 1)
-        else:
-            self.padding = (settings.kernel_size - 1) // 2
-
-        self.conv_module = self._build_conv_module(settings, self.padding)
-
-        self.norm = create_norm(settings.norm_type, settings.dim_model)
-
-        self.activation = select_reluwise_activation(settings.activation)
-
-        if settings.add_tail_conv:
-            self.tail_pointwise_conv = nn.Conv1d(
-                in_channels=settings.dim_model,
-                out_channels=settings.dim_model,
-                kernel_size=1,
-                stride=1,
-                padding=0,
-                bias=settings.add_bias)
-        else:
-            self.tail_pointwise_conv = nn.Identity()
-
-    def _build_separable_conv(self, settings, padding):
-        dict_modules = collections.OrderedDict([
-            # Point-wise.
-            ("pconv",
-             nn.Conv1d(
-                in_channels=settings.dim_model,
-                out_channels=settings.dim_model * 2,  # for GLU
-                kernel_size=1,
-                stride=1,
-                padding=0,
-                bias=settings.add_bias)),
-            ("glu", nn.GLU(dim=1)),
-            # Depth-wise
-            ("dconv",
-             nn.Conv1d(
-                in_channels=settings.dim_model,
-                out_channels=settings.dim_model,
-                kernel_size=settings.kernel_size,
-                stride=settings.stride,
-                padding=padding,
-                groups=settings.dim_model,
-                padding_mode=settings.padding_mode,
-                bias=settings.add_bias))])
-
-        conv_module = nn.Sequential(dict_modules)
-        return conv_module
-
-    def _build_predepth_conv(self, settings, padding):
-        dict_modules = collections.OrderedDict([
-            # Depth-wise
-            ("dconv",
-             nn.Conv1d(
-                in_channels=settings.dim_model,
-                out_channels=settings.dim_model,
-                kernel_size=settings.kernel_size,
-                stride=settings.stride,
-                padding=padding,
-                groups=settings.dim_model,
-                padding_mode=settings.padding_mode,
-                bias=settings.add_bias)),
-            # Point-wise.
-            ("pconv",
-             nn.Conv1d(
-                in_channels=settings.dim_model,
-                out_channels=settings.dim_model * 2,  # for GLU
-                kernel_size=1,
-                stride=1,
-                padding=0,
-                bias=settings.add_bias)),
-            ("glu", nn.GLU(dim=1))])
-        conv_module = nn.Sequential(dict_modules)
-        return conv_module
-
-    def _build_standard_conv(self, settings, padding):
-        dict_modules = collections.OrderedDict([
-            ("conv",
-             nn.Conv1d(
-                 in_channels=settings.dim_model,
-                 out_channels=settings.dim_model * 2,  # for GLU
-                 kernel_size=settings.kernel_size,
-                 stride=settings.stride,
-                 padding=self.padding,
-                 bias=settings.add_bias)),
-            ("glu", nn.GLU(dim=1))])
-        conv_module = nn.Sequential(dict_modules)
-        return conv_module
-
-    def _build_conv_module(self, settings, padding):
-        if settings.conv_type == "separable":
-            conv_module = self._build_separable_conv(settings, padding)
-        elif settings.conv_type == "predepth":
-            conv_module = self._build_predepth_conv(settings, padding)
-        elif settings.conv_type == "standard":
-            conv_module = self._build_standard_conv(settings, padding)
-        return conv_module
-
-    def forward(self,
-                feature):
-        # `[N, T, C] -> [N, C, T]`
-        feature = feature.permute([0, 2, 1]).contiguous()
-        feature = self.conv_module(feature)
-
-        if self.causal:
-            feature = feature[:, :, :-self.padding]
-
-        # `[N, C, T]`: channel_first
-        feature = apply_norm(self.norm, feature, channel_first=True)
-
-        feature = self.activation(feature)
-        feature = self.tail_pointwise_conv(feature)
-
-        # `[N, C, T] -> [N, T, C]`
-        feature = feature.permute([0, 2, 1]).contiguous()
-        return feature
-
-
 class ConformerEncoderLayerSettings(ConfiguredModel):
     dim_model: int = 64
     dim_pffn: int = 256
@@ -223,8 +76,8 @@ class ConformerEncoderLayerSettings(ConfiguredModel):
 
     mhsa_settings: MultiheadAttentionSettings = Field(
         default_factory=lambda: MultiheadAttentionSettings())
-    conv_settings: ConformerConvBlockSettings = Field(
-        default_factory=lambda: ConformerConvBlockSettings())
+    conv_settings: CNN1DFeatureExtractorSettings = Field(
+        default_factory=lambda: CNN1DFeatureExtractorSettings())
     pffn_settings: PositionwiseFeedForwardSettings = Field(
         default_factory=lambda: PositionwiseFeedForwardSettings())
 
@@ -235,7 +88,8 @@ class ConformerEncoderLayerSettings(ConfiguredModel):
         self.mhsa_settings.att_dim = self.dim_model
         self.mhsa_settings.out_dim = self.dim_model
         # Adjust conv_settings.
-        self.conv_settings.dim_model = self.dim_model
+        self.conv_settings.in_channels = self.dim_model
+        self.conv_settings.out_channels = self.dim_model
         self.conv_settings.activation = self.activation
         # Adjust pffn_settings.
         self.pffn_settings.dim_model = self.dim_model
@@ -324,7 +178,10 @@ class PreConvConformerEncoderLayer(nn.Module):
         # `[N, qlen, dim_model]`
         residual = feature
         feature = apply_norm(self.norm_conv, feature)
-        feature = self.conv(feature)
+        # `[N, T, C] -> [N, C, T] -> [N, T, C]`
+        feature = feature.permute([0, 2, 1])
+        feature = self.conv(feature, mask=src_key_padding_mask)
+        feature = feature.permute([0, 2, 1])
         feature = self.dropout(feature) + residual
 
         #################################################
@@ -433,7 +290,10 @@ class PostConvConformerEncoderLayer(nn.Module):
         # `[N, qlen, dim_model]`
         residual = feature
         feature = apply_norm(self.norm_conv, feature)
-        feature = self.conv(feature)
+        # `[N, T, C] -> [N, C, T] -> [N, T, C]`
+        feature = feature.permute([0, 2, 1])
+        feature = self.conv(feature, mask=src_key_padding_mask)
+        feature = feature.permute([0, 2, 1])
         feature = self.dropout(feature) + residual
 
         #################################################
