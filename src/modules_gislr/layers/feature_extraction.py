@@ -219,6 +219,7 @@ class CNN1DFeatureExtractorSettings(ConfiguredModel):
     causal: bool | None = False
     add_residual: bool = True
     add_bias: bool = True
+    add_tail_conv: bool = True
     dropout: float = 0.1
 
     def model_post_init(self, __context):
@@ -229,6 +230,123 @@ class CNN1DFeatureExtractorSettings(ConfiguredModel):
         return CNN1DFeatureExtractor(self)
 
 
+def build_channel_attention(attention_type):
+    if attention_type == "none":
+        attention = Identity()
+    elif attention_type == "glu":
+        attention = nn.GLU(dim=1)
+    elif "eca" in attention_type:
+        if "_" in attention_type:
+            att_kernel_size = int(attention_type.split("_")[-1])
+        else:
+            att_kernel_size = 3
+        attention = EfficientChannelAttention(
+            spatial_channels=1, kernel_size=att_kernel_size)
+    return attention
+
+
+class SeparableCNN1D(nn.Module):
+    def __init__(self,
+                 in_channels,
+                 out_channels,
+                 kernel_size,
+                 stride,
+                 padding,
+                 padding_mode,
+                 bias,
+                 attention_type):
+        super().__init__()
+
+        self.pconv = nn.Conv1d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+            bias=bias)
+        self.attention = build_channel_attention(attention_type)
+        self.dconv = nn.Conv1d(
+            in_channels=out_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            padding_mode=padding_mode,
+            groups=out_channels,
+            bias=bias)
+
+    def forward(self, feature, mask=None):
+        feature = self.pconv(feature)
+        feature = self.attention(feature, mask)
+        feature = self.dconv(feature)
+        return feature
+
+
+class PreDepthSeparableCNN1D(nn.Module):
+    def __init__(self,
+                 in_channels,
+                 out_channels,
+                 kernel_size,
+                 stride,
+                 padding,
+                 padding_mode,
+                 bias,
+                 attention_type):
+        super().__init__()
+
+        self.dconv = nn.Conv1d(
+            in_channels=out_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            padding_mode=padding_mode,
+            groups=out_channels,
+            bias=bias)
+        self.pconv = nn.Conv1d(
+            in_channels=out_channels,
+            out_channels=out_channels,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+            bias=bias)
+        self.attention = build_channel_attention(attention_type)
+
+    def forward(self, feature, mask=None):
+        feature = self.dconv(feature)
+        feature = self.pconv(feature)
+        feature = self.attention(feature, mask)
+        return feature
+
+
+class StandardCNN1D(nn.Module):
+    def __init__(self,
+                 in_channels,
+                 out_channels,
+                 kernel_size,
+                 stride,
+                 padding,
+                 padding_mode,
+                 bias,
+                 attention_type):
+        super().__init__()
+
+        self.conv = nn.Conv1d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            padding_mode=padding_mode,
+            bias=bias)
+        self.attention = build_channel_attention(attention_type)
+
+    def forward(self, feature, mask=None):
+        feature = self.conv(feature)
+        feature = self.attention(feature, mask)
+        return feature
+
+
 class CNN1DFeatureExtractor(nn.Module):
     def __init__(self,
                  settings):
@@ -236,7 +354,7 @@ class CNN1DFeatureExtractor(nn.Module):
         assert isinstance(settings, CNN1DFeatureExtractorSettings)
         self.settings = settings
         self.causal = settings.causal
-        self.channel_expand = 2 if settings.attention_type == "glu" else 1
+        self.channel_expand = 2 if settings.attention_type in ["glu", "eca"] else 1
 
         if settings.causal:
             self.padding = (settings.kernel_size - 1)
@@ -244,8 +362,20 @@ class CNN1DFeatureExtractor(nn.Module):
             self.padding = (settings.kernel_size - 1) // 2
 
         self.conv_module = self._build_conv_module(settings, self.padding)
-        self.norm = create_norm(settings.norm_type, settings.out_channels, settings.norm_eps)
+        self.norm = create_norm(settings.norm_type, settings.out_channels * self.channel_expand, settings.norm_eps)
         self.activation = select_reluwise_activation(settings.activation)
+
+        if settings.add_tail_conv:
+            self.tail_pointwise_conv = nn.Conv1d(
+                in_channels=settings.out_channels * self.channel_expand,
+                out_channels=settings.out_channels,
+                kernel_size=1,
+                stride=1,
+                padding=0,
+                bias=settings.add_bias)
+        else:
+            self.tail_pointwise_conv = nn.Identity()
+
         self.dropout = nn.Dropout(p=settings.dropout)
 
         if settings.add_residual:
@@ -266,96 +396,42 @@ class CNN1DFeatureExtractor(nn.Module):
         else:
             self.residual = Zero()
 
-    def _build_separable_conv(self, settings, attention, padding):
-        dict_modules = collections.OrderedDict([
-            # Point-wise.
-            ("pconv",
-             nn.Conv1d(
-                in_channels=settings.in_channels,
-                out_channels=settings.out_channels * self.channel_expand,
-                kernel_size=1,
-                stride=1,
-                padding=0,
-                bias=settings.add_bias)),
-            ("attention", attention),
-            # Depth-wise
-            ("dconv",
-             nn.Conv1d(
-                in_channels=settings.out_channels,
-                out_channels=settings.out_channels,
-                kernel_size=settings.kernel_size,
-                stride=settings.stride,
-                padding=padding,
-                groups=settings.out_channels,
-                padding_mode=settings.padding_mode,
-                bias=settings.add_bias))])
-
-        conv_module = nn.Sequential(dict_modules)
-        return conv_module
-
-    def _build_predepth_conv(self, settings, attention, padding):
-        dict_modules = collections.OrderedDict([
-            # Depth-wise
-            ("dconv",
-             nn.Conv1d(
-                in_channels=settings.in_channels,
-                out_channels=settings.out_channels,
-                kernel_size=settings.kernel_size,
-                stride=settings.stride,
-                padding=padding,
-                groups=settings.out_channels,
-                padding_mode=settings.padding_mode,
-                bias=settings.add_bias)),
-            # Point-wise.
-            ("pconv",
-             nn.Conv1d(
-                in_channels=settings.out_channels,
-                out_channels=settings.out_channels * self.channel_expand,
-                kernel_size=1,
-                stride=1,
-                padding=0,
-                bias=settings.add_bias)),
-            ("attention", attention)])
-        conv_module = nn.Sequential(dict_modules)
-        return conv_module
-
-    def _build_standard_conv(self, settings, attention, padding):
-        dict_modules = collections.OrderedDict([
-            ("conv",
-             nn.Conv1d(
-                 in_channels=settings.in_channels,
-                 out_channels=settings.out_channels * self.channel_expand,
-                 kernel_size=settings.kernel_size,
-                 stride=settings.stride,
-                 padding=self.padding,
-                 bias=settings.add_bias)),
-            ("attention", attention)])
-        conv_module = nn.Sequential(dict_modules)
-        return conv_module
-
     def _build_conv_module(self, settings, padding):
-        if settings.attention_type == "none":
-            attention = Identity()
-        elif settings.attention_type == "glu":
-            attention = nn.GLU(dim=1)
-        elif settings.attention_type == "eca":
-            if "_" in settings.attention_type:
-                kernel_size = int(settings.attention_type.split("_")[-1])
-            else:
-                kernel_size = 3
-            attention = EfficientChannelAttention(
-                spatial_channels=1, kernel_size=kernel_size)
-
         if settings.conv_type == "separable":
-            conv_module = self._build_separable_conv(settings, attention, padding)
+            conv_module = SeparableCNN1D(
+                in_channels=settings.in_channels,
+                out_channels=settings.out_channels * self.channel_expand,
+                kernel_size=settings.kernel_size,
+                stride=settings.stride,
+                padding=padding,
+                padding_mode=settings.padding_mode,
+                bias=settings.add_bias,
+                attention_type=settings.attention_type)
         elif settings.conv_type == "predepth":
-            conv_module = self._build_predepth_conv(settings, attention, padding)
+            conv_module = PreDepthSeparableCNN1D(
+                in_channels=settings.in_channels,
+                out_channels=settings.out_channels * self.channel_expand,
+                kernel_size=settings.kernel_size,
+                stride=settings.stride,
+                padding=padding,
+                padding_mode=settings.padding_mode,
+                bias=settings.add_bias,
+                attention_type=settings.attention_type)
         elif settings.conv_type == "standard":
-            conv_module = self._build_standard_conv(settings, attention, padding)
+            conv_module = StandardCNN1D(
+                in_channels=settings.in_channels,
+                out_channels=settings.out_channels * self.channel_expand,
+                kernel_size=settings.kernel_size,
+                stride=settings.stride,
+                padding=padding,
+                padding_mode=settings.padding_mode,
+                bias=settings.add_bias,
+                attention_type=settings.attention_type)
         return conv_module
 
     def forward(self,
-                feature):
+                feature,
+                mask=None):
         shape = feature.shape
         if len(shape) == 4:
             # `[N, C, T, *] -> [N, C, *, T] -> [N, C', T]`
@@ -367,9 +443,14 @@ class CNN1DFeatureExtractor(nn.Module):
             feature = feature.reshape([shape[0], -1, shape[2]])
 
         res = self.residual(feature)
-        feature = self.conv_module(feature)
-        feature = apply_norm(self.norm, feature, channel_first=True)
+        feature = self.conv_module(feature, mask)
+
+        if self.causal:
+            feature = feature[:, :, :-self.padding]
+
+        feature = apply_norm(self.norm, feature, channel_first=True, mask=mask)
         feature = self.activation(feature)
+        feature = self.tail_pointwise_conv(feature)
         feature = self.dropout(feature)
         feature = feature + res
         return feature
