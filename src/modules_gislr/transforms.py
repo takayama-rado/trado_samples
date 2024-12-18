@@ -1403,6 +1403,7 @@ class ExtractDifferencialFeature():
 
 Mappings = {
     "replace_nan": ReplaceNan,
+    "filter_zero": FilterZero,
     "select_landmarks_and_feature": SelectLandmarksAndFeature,
     "parts_based_normalization": PartsBasedNormalization,
     "parts_based_interpolation": PartsBasedTemporalInterpolation,
@@ -1426,7 +1427,8 @@ Mappings = {
     "random_drop_spatial": RandomDropSpatial,
     "random_drop_temporal": RandomDropTemporal,
     "selective_resize": SelectiveResize,
-    "insert_tokens_cslr": InsertTokensForS2S}
+    "insert_tokens_cslr": InsertTokensForS2S,
+    "extract_diff_feature": ExtractDifferencialFeature}
 
 
 def get_transform(name, kwargs):
