@@ -555,8 +555,12 @@ class PartsBasedTemporalInterpolation():
         if tmask.sum() == tlength:
             return feature
         # Too many failed.
-        if tmask.sum() < self.accept_correct_ratio:
-            return feature
+        if isinstance(self.accept_correct_ratio, float):
+            if tmask.sum() / tlength < self.accept_correct_ratio:
+                return feature
+        if isinstance(self.accept_correct_ratio, int):
+            if tmask.sum() < self.accept_correct_ratio:
+                return feature
         # All failed.
         if tmask.sum() == 0.0:
             return feature
