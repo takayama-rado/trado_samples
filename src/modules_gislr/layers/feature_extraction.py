@@ -19,6 +19,7 @@ from __future__ import unicode_literals
 import collections
 
 from typing import (
+    List,
     Tuple)
 
 # Third party's modules
@@ -453,6 +454,123 @@ class CNN1DFeatureExtractor(nn.Module):
         feature = self.tail_pointwise_conv(feature)
         feature = self.dropout(feature)
         feature = feature + res
+        return feature
+
+
+class PartsBasedCNN1DFeatureExtractorSettings(CNN1DFeatureExtractorSettings):
+    fext_type: str = "cnn1d_parts"
+    add_aggrigation: bool = False
+    use_features: Tuple[str, ...] | List[str] | None = None
+
+    face_head: int = 0
+    face_num: int = 76
+    lhand_head: int = 76
+    lhand_num: int = 21
+    pose_head: int = 76 + 21
+    pose_num: int = 12
+    rhand_head: int = 76 + 21 + 12
+    rhand_num: int = 21
+
+    def build_layer(self):
+        return PartsBasedCNN1DFeatureExtractor(self)
+
+    def build_inner_conv_layer(self):
+        temp = self.model_dump(
+            exclude=(
+                "add_aggrigation",
+                "use_features",
+                "face_head", "face_num",
+                "lhand_head", "lhand_num",
+                "pose_head", "pose_num",
+                "rhand_head", "rhand_num"))
+        conv_settings = CNN1DFeatureExtractorSettings.model_validate(temp)
+        return conv_settings.build_layer()
+
+
+class PartsBasedCNN1DFeatureExtractor(nn.Module):
+    def __init__(self,
+                 settings):
+        super().__init__()
+        assert isinstance(settings, PartsBasedCNN1DFeatureExtractorSettings)
+
+        if settings.use_features is None:
+            # Simply divide by parts.
+            settings_face = settings.model_copy(
+                update={
+                    "in_channels": settings.in_channels // 4,
+                    "out_channels": settings.out_channels // 4})
+            settings_lhand = settings_face.model_copy()
+            settings_pose = settings_face.model_copy()
+            settings_rhand = settings_face.model_copy()
+        else:
+            # `[N, C, T, J] -> [N, C*J(face), T]`
+            base_channels = len(settings.use_features)
+            settings_face = settings.model_copy(
+                update={
+                    "in_channels": base_channels * settings.face_num,
+                    "out_channels": settings.out_channels // 4})
+            settings_lhand = settings.model_copy(
+                update={
+                    "in_channels": base_channels * settings.lhand_num,
+                    "out_channels": settings.out_channels // 4})
+            settings_pose = settings.model_copy(
+                update={
+                    "in_channels": base_channels * settings.pose_num,
+                    "out_channels": settings.out_channels // 4})
+            settings_rhand = settings.model_copy(
+                update={
+                    "in_channels": base_channels * settings.rhand_num,
+                    "out_channels": settings.out_channels // 4})
+
+        self.settings = settings
+
+        self.face_conv = settings_face.build_inner_conv_layer()
+        self.lhand_conv = settings_lhand.build_inner_conv_layer()
+        self.pose_conv = settings_pose.build_inner_conv_layer()
+        self.rhand_conv = settings_rhand.build_inner_conv_layer()
+
+        self.face_head = settings.face_head
+        self.face_num = settings.face_num
+        self.lhand_head = settings.lhand_head
+        self.lhand_num = settings.lhand_num
+        self.pose_head = settings.pose_head
+        self.pose_num = settings.pose_num
+        self.rhand_head = settings.rhand_head
+        self.rhand_num = settings.rhand_num
+
+        self.parts_dropout = nn.Dropout(p=0.5)
+
+        if settings.add_aggrigation:
+            settings_tail = settings.model_copy(
+                update={
+                    "in_channels": settings.out_channels,
+                    "out_channels": settings.out_channels})
+            self.tail_conv = settings_tail.build_inner_conv_layer()
+        else:
+            self.tail_conv = Identity()
+
+    def forward(self,
+                feature,
+                mask=None):
+        if not isinstance(feature, (list, tuple)):
+            assert len(feature.shape) == 4, f"{feature.shape}"
+            # `[N, C, T, J]`
+            face = feature[:, :, :, self.face_head: self.face_head+self.face_num]
+            lhand = feature[:, :, :, self.lhand_head: self.lhand_head+self.lhand_num]
+            pose = feature[:, :, :, self.pose_head: self.pose_head+self.pose_num]
+            rhand = feature[:, :, :, self.rhand_head: self.rhand_head+self.rhand_num]
+        else:
+            # `[N, C, T]`
+            face, lhand, pose, rhand = feature
+        face = self.face_conv(face, mask)
+        lhand = self.lhand_conv(lhand, mask)
+        pose = self.pose_conv(pose, mask)
+        rhand = self.rhand_conv(rhand, mask)
+
+        feature = (face, lhand, pose, rhand)
+        if self.settings.add_aggrigation:
+            feature = torch.cat(feature, dim=1)
+            feature = self.tail_conv(feature, mask)
         return feature
 
 
