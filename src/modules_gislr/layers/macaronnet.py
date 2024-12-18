@@ -57,6 +57,7 @@ DIR_OUTPUT = None
 
 class MacaronNetEncoderLayerSettings(ConfiguredModel):
     dim_model: int = 64
+    dim_pffn: int = 256
     activation: str = Field(default="relu",
         pattern=r"relu|gelu|swish|silu|mish|geluacc|tanhexp")
     norm_type_sattn: str = Field(default="layer", pattern=r"layer|batch")
@@ -79,6 +80,7 @@ class MacaronNetEncoderLayerSettings(ConfiguredModel):
         self.mhsa_settings.out_dim = self.dim_model
         # Adjust pffn_settings.
         self.pffn_settings.dim_model = self.dim_model
+        self.pffn_settings.dim_pffn = self.dim_pffn
         self.pffn_settings.activation = self.activation
 
         # Propagate.
