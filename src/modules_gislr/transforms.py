@@ -33,7 +33,7 @@ import torch
 from scipy import interpolate as ip
 
 # Local modules
-from .defines import(
+from .defines import (
     USE_FACE,
     USE_LHAND,
     USE_POSE,
@@ -59,6 +59,27 @@ class ReplaceNan():
                  data: Dict[str, Any]) -> Dict[str, Any]:
         feature = data["feature"]
         feature[np.isnan(feature)] = self.replace_val
+        data["feature"] = feature
+        return data
+
+
+class FilterZero():
+    """ Filter Zero value in the feature.
+    """
+    def __init__(self,
+                 apply_ratio=1.0) -> None:
+        self.apply_ratio = apply_ratio
+
+    def __call__(self,
+                 data: Dict[str, Any]) -> Dict[str, Any]:
+        if random.random() > self.apply_ratio:
+            return data
+        feature = data["feature"]
+        # Drop.
+        zmask = feature == 0.0
+        zmask = np.all(zmask, axis=(0, 2))
+        zmask = np.logical_not(zmask)
+        feature = feature[:, zmask, :]
         data["feature"] = feature
         return data
 
