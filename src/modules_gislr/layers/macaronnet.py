@@ -28,6 +28,8 @@ from pydantic import (
 from torch import nn
 
 # Local modules
+from .feature_extraction import (
+    create_fext_module)
 from .misc import (
     ConfiguredModel,
     GPoolRecognitionHeadSettings,
@@ -202,20 +204,21 @@ class MacaronNetEnISLRSettings(ConfiguredModel):
         self.encoder_settings.model_post_init(__context)
         self.head_settings.model_post_init(__context)
 
-    def build_layer(self):
-        return MacaronNetEnISLR(self)
+    def build_layer(self, fext_settings=None):
+        return MacaronNetEnISLR(self, fext_settings)
 
 
 class MacaronNetEnISLR(nn.Module):
     def __init__(self,
-                 settings):
+                 settings,
+                 fext_settings=None):
         super().__init__()
         assert isinstance(settings, MacaronNetEnISLRSettings)
         self.settings = settings
+        self.fext_settings = fext_settings
 
         # Feature extraction.
-        self.linear = nn.Linear(settings.in_channels, settings.inter_channels)
-        self.activation = select_reluwise_activation(settings.activation)
+        self.fext_module = create_fext_module(fext_settings)
 
         self.pooling = build_pooling_layer(settings.pooling_type)
 
@@ -225,34 +228,34 @@ class MacaronNetEnISLR(nn.Module):
 
         self.head = settings.head_settings.build_layer()
 
+    def _apply_fext(self,
+                    feature,
+                    mask=None):
+        for layer in self.fext_module:
+            feature = layer(feature, mask=mask)
+        return feature
+
     def forward(self,
                 feature,
                 feature_causal_mask=None,
                 feature_pad_mask=None):
         # Feature extraction.
-        # `[N, C, T, J] -> [N, T, C, J] -> [N, T, C*J] -> [N, T, C']`
-        N, C, T, J = feature.shape
-        feature = feature.permute([0, 2, 1, 3])
-        feature = feature.reshape(N, T, -1)
+        feature = self._apply_fext(feature, mask=feature_pad_mask)
 
-        feature = self.linear(feature)
-        if torch.isnan(feature).any():
-            raise ValueError()
-        feature = self.activation(feature)
-        if torch.isnan(feature).any():
-            raise ValueError()
+        # `[N, C, T] -> [N, T, C]`
+        feature = feature.permute([0, 2, 1])
 
         # Apply pooling.
         feature = self.pooling(feature)
         if feature_pad_mask is not None:
-            # Cast to apply pooling.
-            feature_pad_mask = feature_pad_mask.to(feature.dtype)
-            feature_pad_mask = self.pooling(feature_pad_mask.unsqueeze(-1)).squeeze(-1)
-            # Binarization.
-            # This removes averaged signals with padding.
-            feature_pad_mask = feature_pad_mask > 0.5
-            if feature_causal_mask is not None:
-                feature_causal_mask = make_causal_mask(feature_pad_mask)
+            if feature_pad_mask.shape[-1] != feature.shape[1]:
+                feature_pad_mask = F.interpolate(
+                    feature_pad_mask.unsqueeze(1).float(),
+                    feature.shape[1],
+                    mode="nearest")
+                feature_pad_mask = feature_pad_mask.squeeze(1) > 0.5
+                if feature_causal_mask is not None:
+                    feature_causal_mask = make_causal_mask(feature_pad_mask)
 
         feature = self.tr_encoder(
             feature=feature,
