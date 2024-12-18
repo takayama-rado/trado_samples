@@ -1376,6 +1376,31 @@ class InsertTokensForS2S():
         return data
 
 
+class ExtractDifferencialFeature():
+    def __init__(self,
+                 orders=[1, 2]):
+        assert len(orders) > 0
+        for dig in orders:
+            assert isinstance(dig, int), f"{orders}"
+            assert dig > 0, f"{orders}"
+
+        self.orders = orders
+
+    def __call__(self,
+                 data: Dict[str, Any]) -> Dict[str, Any]:
+
+        feature = data["feature"]
+        newfeature = copy.deepcopy(feature)
+        for order in self.orders:
+            # `[C, T, J]`
+            temp = np.pad(feature, ((0, 0), (0, order), (0, 0)))
+            diff = np.diff(temp, n=order, axis=1)
+            assert feature.shape == diff.shape, f"{feature.shape}, {diff.shape}, {order}"
+            newfeature = np.concatenate([feature, diff], axis=0)
+        data["feature"] = newfeature
+        return data
+
+
 Mappings = {
     "replace_nan": ReplaceNan,
     "select_landmarks_and_feature": SelectLandmarksAndFeature,
