@@ -210,6 +210,7 @@ class ConformerConvBlock(nn.Module):
 
 class ConformerEncoderLayerSettings(ConfiguredModel):
     dim_model: int = 64
+    dim_pffn: int = 256
     activation: str = Field(default="relu",
         pattern=r"relu|gelu|swish|silu|mish|geluacc|tanhexp")
     norm_type_sattn: str = Field(default="layer", pattern=r"layer|batch")
@@ -238,6 +239,7 @@ class ConformerEncoderLayerSettings(ConfiguredModel):
         self.conv_settings.activation = self.activation
         # Adjust pffn_settings.
         self.pffn_settings.dim_model = self.dim_model
+        self.pffn_settings.dim_pffn = self.dim_pffn
         self.pffn_settings.activation = self.activation
 
         # Propagate.
