@@ -62,8 +62,8 @@ class MacaronNetEncoderLayerSettings(ConfiguredModel):
     dim_pffn: int = 256
     activation: str = Field(default="relu",
         pattern=r"relu|gelu|swish|silu|mish|geluacc|tanhexp")
-    norm_type_sattn: str = Field(default="layer", pattern=r"layer|batch")
-    norm_type_pffn: str = Field(default="layer", pattern=r"layer|batch")
+    norm_type_sattn: str = Field(default="layer", pattern=r"layer|batch|masked_batch|masked_batch2d")
+    norm_type_pffn: str = Field(default="layer", pattern=r"layer|batch|masked_batch|masked_batch2d")
     norm_eps: float = 1e-5
     dropout: float = 0.1
     fc_factor: float = 0.5
@@ -145,7 +145,7 @@ class MacaronNetEncoderLayer(nn.Module):
         #################################################
         # `[N, qlen, dim_model]`
         residual = feature
-        feature = apply_norm(self.norm_pffn1, feature)
+        feature = apply_norm(self.norm_pffn1, feature, mask=src_key_padding_mask)
         feature = self.pffn1(feature)
         feature = self.fc_factor * self.dropout(feature) + residual
 
@@ -154,7 +154,7 @@ class MacaronNetEncoderLayer(nn.Module):
         #################################################
         # `[N, qlen, dim_model]`
         residual = feature
-        feature = apply_norm(self.norm_sattn, feature)
+        feature = apply_norm(self.norm_sattn, feature, mask=src_key_padding_mask)
         feature, self.attw = self.self_attn(
             key=feature,
             value=feature,
@@ -167,7 +167,7 @@ class MacaronNetEncoderLayer(nn.Module):
         #################################################
         # `[N, qlen, dim_model]`
         residual = feature
-        feature = apply_norm(self.norm_pffn2, feature)
+        feature = apply_norm(self.norm_pffn2, feature, mask=src_key_padding_mask)
         feature = self.pffn2(feature)
         feature = self.fc_factor * self.dropout(feature) + residual
 
