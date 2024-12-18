@@ -396,8 +396,9 @@ class RandomClip():
                 else:
                     offset = self.offset
                 # `[C, T, J]`
-                feature = feature[:, offset: aug_timelen + offset, :]
-
+                tail = max(min(aug_timelen + offset, base_timelen-1), offset+1)
+                feature = feature[:, offset: tail, :]
+        assert feature.shape[1] > 0, f"{feature.shape}, {base_timelen}, {aug_timelen}, {offset}, {tail}"
         data["feature"] = feature
         return data
 
