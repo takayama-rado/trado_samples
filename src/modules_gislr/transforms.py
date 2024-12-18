@@ -622,7 +622,8 @@ class AlignWrist():
                  lhand_wrist=76,
                  rhand_head=76+21+12,
                  rhand_num=21,
-                 rhand_wrist=76+21+12):
+                 rhand_wrist=76+21+12,
+                 align_back_of_hand=False):
         self.apply_ratio = apply_ratio
         self.pose_lwrist = pose_lwrist
         self.pose_rwrist = pose_rwrist
@@ -632,12 +633,93 @@ class AlignWrist():
         self.rhand_head = rhand_head
         self.rhand_num = rhand_num
         self.rhand_wrist = rhand_wrist
+        self.align_back_of_hand = align_back_of_hand
 
     def _gen_tmask(self, feature):
         tmask = feature == 0.0
         tmask = np.all(tmask, axis=(0, 2))
         tmask = np.logical_not(tmask)
         return tmask
+
+    def _align_back_of_hand(self,
+                            hand,
+                            pose_w,
+                            pose_pm,
+                            pose_im,
+                            hand_w,
+                            hand_pm,
+                            hand_im,
+                            tmask):
+        # Normalized direction.
+        # `[C, T, J] -> [T, C]`
+        pose_pm_w = pose_pm - pose_w
+        pose_im_w = pose_im - pose_w
+        pose_pm_w = pose_pm_w.squeeze(-1).transpose([1, 0])
+        pose_im_w = pose_im_w.squeeze(-1).transpose([1, 0])
+        pnorm_pm_w = np.linalg.norm(pose_pm_w, axis=-1)[:, None]
+        pnorm_im_w = np.linalg.norm(pose_im_w, axis=-1)[:, None]
+        # To avoid 0 divide.
+        pnorm_pm_w[pnorm_pm_w == 0] = 1.0
+        pnorm_im_w[pnorm_im_w == 0] = 1.0
+        pose_pm_w /= pnorm_pm_w
+        pose_im_w /= pnorm_im_w
+
+        hand_pm_w = hand_pm - hand_w
+        hand_im_w = hand_im - hand_w
+        hand_pm_w = hand_pm_w.squeeze(-1).transpose([1, 0])
+        hand_im_w = hand_im_w.squeeze(-1).transpose([1, 0])
+        hnorm_pm_w = np.linalg.norm(hand_pm_w, axis=-1)[:, None]
+        hnorm_im_w = np.linalg.norm(hand_im_w, axis=-1)[:, None]
+        # To avoid 0 divide.
+        hnorm_pm_w[hnorm_pm_w == 0] = 1.0
+        hnorm_im_w[hnorm_im_w == 0] = 1.0
+        hand_pm_w /= hnorm_pm_w
+        hand_im_w /= hnorm_im_w
+
+        # Normal vectors.
+        pose_n = np.cross(pose_im_w, pose_pm_w)
+        hand_n = np.cross(hand_im_w, hand_pm_w)
+        pnorm_n = np.linalg.norm(pose_n, axis=-1)[:, None]
+        hnorm_n = np.linalg.norm(hand_n, axis=-1)[:, None]
+        # To avoid 0 divide.
+        pnorm_n[pnorm_n == 0] = 1.0
+        hnorm_n[hnorm_n == 0] = 1.0
+        pose_n /= pnorm_n
+        hand_n /= hnorm_n
+
+        # Calculate parallel vectors to each plane.
+        pose_parallel = np.cross(pose_n, pose_pm_w)
+        hand_parallel = np.cross(hand_n, hand_pm_w)
+        pnorm_p = np.linalg.norm(pose_parallel, axis=-1)[:, None]
+        hnorm_p = np.linalg.norm(hand_parallel, axis=-1)[:, None]
+        # To avoid 0 divide.
+        pnorm_p[pnorm_p == 0] = 1.0
+        hnorm_p[hnorm_p == 0] = 1.0
+        pose_parallel /= pnorm_p
+        hand_parallel /= hnorm_p
+
+        # Convert to column vectors.
+        pose_pm_w = np.expand_dims(pose_pm_w, axis=-1)
+        pose_parallel = np.expand_dims(pose_parallel, axis=-1)
+        pose_n = np.expand_dims(pose_n, axis=-1)
+        hand_pm_w = np.expand_dims(hand_pm_w, axis=-1)
+        hand_parallel = np.expand_dims(hand_parallel, axis=-1)
+        hand_n = np.expand_dims(hand_n, axis=-1)
+
+        # Transform matrix from hand to pose.
+        mat_p = np.concatenate([pose_pm_w, pose_parallel, pose_n], axis=-1)
+        mat_h = np.concatenate([hand_pm_w, hand_parallel, hand_n], axis=-1)
+        # Do not transform failed tracking points.
+        mat_p[tmask, :, :] = np.eye(mat_p.shape[-1])
+        mat_h[tmask, :, :] = np.eye(mat_h.shape[-1])
+
+        mat_hi = np.linalg.inv(mat_h)
+        mat_h2p = np.matmul(mat_p, mat_hi).transpose([1, 2, 0])
+
+        hand -= hand_w
+        hand = np.einsum("ij...,j...->i...", mat_h2p[:, :, :, None], hand)
+        hand += hand_w
+        return hand
 
     def __call__(self,
                  data: Dict[str, Any]) -> Dict[str, Any]:
@@ -646,6 +728,7 @@ class AlignWrist():
         if random.random() > self.apply_ratio:
             return data
 
+        # Align position.
         feature = data["feature"]
         pose_lw = feature[:, :, self.pose_lwrist: self.pose_lwrist+1]
         pose_rw = feature[:, :, self.pose_rwrist: self.pose_rwrist+1]
@@ -667,6 +750,49 @@ class AlignWrist():
         rhand -= diff_r
         feature[:, :, self.lhand_head: self.lhand_head+self.lhand_num] = lhand
         feature[:, :, self.rhand_head: self.rhand_head+self.rhand_num] = rhand
+
+        if self.align_back_of_hand is True:
+            # Align plane.
+            pose_l_w = feature[:, :, self.pose_lwrist: self.pose_lwrist+1]
+            pose_l_pm = feature[:, :, self.pose_lwrist+2: self.pose_lwrist+3]
+            pose_l_im = feature[:, :, self.pose_lwrist+4: self.pose_lwrist+5]
+
+            pose_r_w = feature[:, :, self.pose_rwrist: self.pose_rwrist+1]
+            pose_r_pm = feature[:, :, self.pose_rwrist+2: self.pose_rwrist+3]
+            pose_r_im = feature[:, :, self.pose_rwrist+4: self.pose_rwrist+5]
+
+            hand_l_w = feature[:, :, self.lhand_wrist: self.lhand_wrist+1].copy()
+            hand_l_pm = feature[:, :, self.lhand_wrist+17: self.lhand_wrist+18]
+            hand_l_im = feature[:, :, self.lhand_wrist+5: self.lhand_wrist+6]
+
+            hand_r_w = feature[:, :, self.rhand_wrist: self.rhand_wrist+1].copy()
+            hand_r_pm = feature[:, :, self.rhand_wrist+17: self.rhand_wrist+18]
+            hand_r_im = feature[:, :, self.rhand_wrist+5: self.rhand_wrist+6]
+
+            # LHand.
+            if tmask_l.sum() > 0:
+                lhand = self._align_back_of_hand(
+                    hand=lhand,
+                    pose_w=pose_l_w,
+                    pose_pm=pose_l_pm,
+                    pose_im=pose_l_im,
+                    hand_w=hand_l_w,
+                    hand_pm=hand_l_pm,
+                    hand_im=hand_l_im,
+                    tmask=np.logical_not(tmask_l))
+                feature[:, :, self.lhand_head: self.lhand_head+self.lhand_num] = lhand
+            # RHand.
+            if tmask_r.sum() > 0:
+                rhand = self._align_back_of_hand(
+                    hand=rhand,
+                    pose_w=pose_r_w,
+                    pose_pm=pose_r_pm,
+                    pose_im=pose_r_im,
+                    hand_w=hand_r_w,
+                    hand_pm=hand_r_pm,
+                    hand_im=hand_r_im,
+                    tmask=np.logical_not(tmask_r))
+                feature[:, :, self.rhand_head: self.rhand_head+self.rhand_num] = rhand
 
         data["feature"] = feature
         return data
