@@ -172,9 +172,11 @@ def val_loop(dataloader, model, loss_fn, device, use_mask=True,
 
 
 def test_loop(dataloader, model, device, use_mask=False,
-              return_pred_times=False):
+              return_pred_times=False,
+              top_k=5):
     size = len(dataloader.dataset)
     correct = 0
+    correct_topk = 0
 
     # Inspect model signature.
     sig = signature(model.forward)
@@ -185,6 +187,7 @@ def test_loop(dataloader, model, device, use_mask=False,
 
     # Switch to evaluation mode.
     model.eval()
+
     # Main loop.
     print("Start evaluation.")
     start = time.perf_counter()
@@ -210,13 +213,22 @@ def test_loop(dataloader, model, device, use_mask=False,
             pred_ids = pred.argmax(dim=1).unsqueeze(-1)
             count = (pred_ids == token).sum().detach().cpu().numpy()
             correct += int(count)
+            if top_k > 1:
+                pred_ids_topk = torch.topk(pred.flatten(), k=top_k).indices
+                count = (pred_ids_topk == token).sum().detach().cpu().numpy()
+                correct_topk += int(count)
     print(f"Done. Time:{time.perf_counter()-start}")
 
     acc = correct / size * 100
     print("Test performance: \n",
           f"Accuracy:{acc:>0.1f}%")
+    acc_top_k = None
+    if top_k > 1:
+        acc_top_k = correct_topk / size * 100
+        print("Test performance: \n",
+              f"Top-{top_k} Accuracy:{acc_top_k:>0.1f}%")
     pred_times = np.array(pred_times)
-    retval = (acc, pred_times) if return_pred_times else acc
+    retval = (acc, acc_top_k, pred_times) if return_pred_times else acc
     return retval
 
 
