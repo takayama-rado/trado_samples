@@ -168,7 +168,7 @@ class PreConvConformerEncoderLayer(nn.Module):
         #################################################
         # `[N, qlen, dim_model]`
         residual = feature
-        feature = apply_norm(self.norm_pffn1, feature)
+        feature = apply_norm(self.norm_pffn1, feature, mask=src_key_padding_mask)
         feature = self.pffn1(feature)
         feature = self.fc_factor * self.dropout(feature) + residual
 
@@ -177,7 +177,7 @@ class PreConvConformerEncoderLayer(nn.Module):
         #################################################
         # `[N, qlen, dim_model]`
         residual = feature
-        feature = apply_norm(self.norm_conv, feature)
+        feature = apply_norm(self.norm_conv, feature, mask=src_key_padding_mask)
         # `[N, T, C] -> [N, C, T] -> [N, T, C]`
         feature = feature.permute([0, 2, 1])
         feature = self.conv(feature, mask=src_key_padding_mask)
@@ -189,7 +189,7 @@ class PreConvConformerEncoderLayer(nn.Module):
         #################################################
         # `[N, qlen, dim_model]`
         residual = feature
-        feature = apply_norm(self.norm_sattn, feature)
+        feature = apply_norm(self.norm_sattn, feature, mask=src_key_padding_mask)
         feature, self.attw = self.self_attn(
             key=feature,
             value=feature,
@@ -202,7 +202,7 @@ class PreConvConformerEncoderLayer(nn.Module):
         #################################################
         # `[N, qlen, dim_model]`
         residual = feature
-        feature = apply_norm(self.norm_pffn2, feature)
+        feature = apply_norm(self.norm_pffn2, feature, mask=src_key_padding_mask)
         feature = self.pffn2(feature)
         feature = self.fc_factor * self.dropout(feature) + residual
         return feature
@@ -267,7 +267,7 @@ class PostConvConformerEncoderLayer(nn.Module):
         #################################################
         # `[N, qlen, dim_model]`
         residual = feature
-        feature = apply_norm(self.norm_pffn1, feature)
+        feature = apply_norm(self.norm_pffn1, feature, mask=src_key_padding_mask)
         feature = self.pffn1(feature)
         feature = self.fc_factor * self.dropout(feature) + residual
 
@@ -276,7 +276,7 @@ class PostConvConformerEncoderLayer(nn.Module):
         #################################################
         # `[N, qlen, dim_model]`
         residual = feature
-        feature = apply_norm(self.norm_sattn, feature)
+        feature = apply_norm(self.norm_sattn, feature, mask=src_key_padding_mask)
         feature, self.attw = self.self_attn(
             key=feature,
             value=feature,
@@ -289,7 +289,7 @@ class PostConvConformerEncoderLayer(nn.Module):
         #################################################
         # `[N, qlen, dim_model]`
         residual = feature
-        feature = apply_norm(self.norm_conv, feature)
+        feature = apply_norm(self.norm_conv, feature, mask=src_key_padding_mask)
         # `[N, T, C] -> [N, C, T] -> [N, T, C]`
         feature = feature.permute([0, 2, 1])
         feature = self.conv(feature, mask=src_key_padding_mask)
@@ -301,7 +301,7 @@ class PostConvConformerEncoderLayer(nn.Module):
         #################################################
         # `[N, qlen, dim_model]`
         residual = feature
-        feature = apply_norm(self.norm_pffn2, feature)
+        feature = apply_norm(self.norm_pffn2, feature, mask=src_key_padding_mask)
         feature = self.pffn2(feature)
         feature = self.fc_factor * self.dropout(feature) + residual
         return feature
